@@ -66,6 +66,15 @@ def _drop_verification_continuation_scaffolding(messages) -> None:
     ]
 
 
+def format_pending_steer_follow_up(steer_text: str) -> str:
+    return (
+        "Operator steering arrived during the previous active turn but was not "
+        "seen before that turn finished. Treat it as the next priority "
+        "correction now.\n\n"
+        f"{steer_text}"
+    )
+
+
 def finalize_turn(
     agent,
     *,
@@ -615,9 +624,21 @@ def finalize_turn(
     # If a /steer landed after the final assistant turn (no more tool
     # batches to drain into), hand it back to the caller so it can be
     # delivered as the next user turn instead of being silently lost.
-    _leftover_steer = agent._drain_pending_steer()
-    if _leftover_steer:
-        result["pending_steer"] = _leftover_steer
+    _leftover_steer_record = None
+    _drain_record = getattr(agent, "_drain_pending_steer_record", None)
+    if callable(_drain_record):
+        _leftover_steer_record = _drain_record()
+    else:
+        _leftover_steer = agent._drain_pending_steer()
+        if _leftover_steer:
+            _leftover_steer_record = {"id": None, "text": _leftover_steer, "status": "pending"}
+    _leftover_steer_text = (
+        _leftover_steer_record.get("text")
+        if isinstance(_leftover_steer_record, dict)
+        else None
+    )
+    if _leftover_steer_text:
+        result["pending_steer"] = format_pending_steer_follow_up(_leftover_steer_text)
     agent._response_was_previewed = False
 
     # Include interrupt message if one triggered the interrupt

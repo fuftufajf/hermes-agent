@@ -3023,6 +3023,115 @@ class AIAgent:
                 self._pending_steer = None
         return True
 
+    @staticmethod
+    def _new_pending_steer_record(
+        text: str,
+        *,
+        status: str = "pending",
+        record_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return {
+            "id": record_id or uuid.uuid4().hex,
+            "text": text,
+            "status": status,
+        }
+
+    @staticmethod
+    def _normalize_pending_steer_record(raw_record: Any) -> Optional[Dict[str, Any]]:
+        if raw_record is None:
+            return None
+        if isinstance(raw_record, str):
+            raw_record = raw_record.strip()
+            if not raw_record:
+                return None
+            return AIAgent._new_pending_steer_record(raw_record)
+        if not isinstance(raw_record, dict):
+            return None
+        text = raw_record.get("text")
+        if not isinstance(text, str) or not text.strip():
+            return None
+        status = raw_record.get("status", "pending")
+        if status not in {"pending", "applied"}:
+            status = "pending"
+        record_id = raw_record.get("id")
+        if not isinstance(record_id, str) or not record_id:
+            record_id = uuid.uuid4().hex
+        return {
+            "id": record_id,
+            "text": text,
+            "status": status,
+        }
+
+    def _set_pending_steer_record(self, record: Optional[Dict[str, Any]]) -> None:
+        def _choose_record(current: Any) -> Optional[Dict[str, Any]]:
+            # If a newer /steer arrived after this record was drained but before
+            # it was marked applied, do not overwrite that newer pending text.
+            # The applied marker is only bookkeeping; pending operator text wins.
+            if isinstance(record, dict) and record.get("status") == "applied":
+                existing = self._normalize_pending_steer_record(current)
+                if (
+                    existing is not None
+                    and existing.get("status") == "pending"
+                    and existing.get("id") != record.get("id")
+                ):
+                    return existing
+            return record
+
+        _lock = getattr(self, "_pending_steer_lock", None)
+        if _lock is None:
+            self._pending_steer = _choose_record(getattr(self, "_pending_steer", None))
+            return
+        with _lock:
+            self._pending_steer = _choose_record(self._pending_steer)
+
+    def _append_pending_steer_text(
+        self,
+        text: str,
+        *,
+        record_id: Optional[str] = None,
+        status: str = "pending",
+    ) -> None:
+        if not text:
+            return
+        _lock = getattr(self, "_pending_steer_lock", None)
+        if _lock is None:
+            existing = self._normalize_pending_steer_record(self._pending_steer)
+            self._pending_steer = self._append_pending_steer_text_to_record(
+                existing,
+                text,
+                record_id=record_id,
+                status=status,
+            )
+            return
+        with _lock:
+            existing = self._normalize_pending_steer_record(self._pending_steer)
+            self._pending_steer = self._append_pending_steer_text_to_record(
+                existing,
+                text,
+                record_id=record_id,
+                status=status,
+            )
+
+    @staticmethod
+    def _append_pending_steer_text_to_record(
+        pending_record: Optional[Dict[str, Any]],
+        text: str,
+        *,
+        record_id: Optional[str] = None,
+        status: str = "pending",
+    ) -> Dict[str, Any]:
+        if pending_record is not None and pending_record.get("status") == "pending":
+            old_text = pending_record.get("text")
+            if not isinstance(old_text, str):
+                old_text = ""
+            pending_record["text"] = (old_text + "\n" + text) if old_text else text
+            return pending_record
+        return AIAgent._new_pending_steer_record(
+            text,
+            status=status,
+            record_id=record_id,
+        )
+
     def steer(self, text: str) -> bool:
         """
         Inject a user message into the next tool result without interrupting.
@@ -3044,20 +3153,21 @@ class AIAgent:
         if not text or not text.strip():
             return False
         cleaned = text.strip()
+        self._append_pending_steer_text(cleaned)
+        return True
+
+    def _drain_pending_steer_record(self) -> Optional[Dict[str, Any]]:
         _lock = getattr(self, "_pending_steer_lock", None)
         if _lock is None:
-            # Test stubs that built AIAgent via object.__new__ skip __init__.
-            # Fall back to direct attribute set; no concurrent callers expected
-            # in those stubs.
-            existing = getattr(self, "_pending_steer", None)
-            self._pending_steer = (existing + "\n" + cleaned) if existing else cleaned
-            return True
-        with _lock:
-            if self._pending_steer:
-                self._pending_steer = self._pending_steer + "\n" + cleaned
-            else:
-                self._pending_steer = cleaned
-        return True
+            record = self._normalize_pending_steer_record(self._pending_steer)
+            self._pending_steer = None
+        else:
+            with _lock:
+                record = self._normalize_pending_steer_record(self._pending_steer)
+                self._pending_steer = None
+        if not record or record.get("status") != "pending":
+            return None
+        return record
 
     def redirect(self, text: str) -> bool:
         """Redirect the active turn without converting it into a new task.
@@ -3177,15 +3287,10 @@ class AIAgent:
         Safe to call from the agent execution thread after appending tool
         results. Returns None when no steer is pending.
         """
-        _lock = getattr(self, "_pending_steer_lock", None)
-        if _lock is None:
-            text = getattr(self, "_pending_steer", None)
-            self._pending_steer = None
-            return text
-        with _lock:
-            text = self._pending_steer
-            self._pending_steer = None
-        return text
+        record = self._drain_pending_steer_record()
+        if not record:
+            return None
+        return record.get("text")
 
     def _record_file_mutation_result(
         self,

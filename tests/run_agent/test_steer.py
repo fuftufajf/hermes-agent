@@ -8,10 +8,10 @@ and prompt-cache integrity.
 from __future__ import annotations
 
 import threading
-
 import pytest
 
 from agent.prompt_builder import STEER_MARKER_OPEN, format_steer_marker
+from agent.turn_finalizer import format_pending_steer_follow_up
 from run_agent import AIAgent
 
 
@@ -44,11 +44,26 @@ def _bare_agent() -> AIAgent:
     return agent
 
 
+def _pending_steer_text(agent: AIAgent):
+    record = getattr(agent, "_pending_steer", None)
+    if isinstance(record, dict):
+        return record.get("text")
+    return record
+
+
+def _pending_steer_status(agent: AIAgent):
+    record = getattr(agent, "_pending_steer", None)
+    if isinstance(record, dict):
+        return record.get("status")
+    return None
+
+
 class TestSteerAcceptance:
     def test_accepts_non_empty_text(self):
         agent = _bare_agent()
         assert agent.steer("go ahead and check the logs") is True
-        assert agent._pending_steer == "go ahead and check the logs"
+        assert _pending_steer_text(agent) == "go ahead and check the logs"
+        assert _pending_steer_status(agent) == "pending"
 
     def test_rejects_empty_string(self):
         agent = _bare_agent()
@@ -68,14 +83,16 @@ class TestSteerAcceptance:
     def test_strips_surrounding_whitespace(self):
         agent = _bare_agent()
         assert agent.steer("  hello world  \n") is True
-        assert agent._pending_steer == "hello world"
+        assert _pending_steer_text(agent) == "hello world"
+        assert _pending_steer_status(agent) == "pending"
 
     def test_concatenates_multiple_steers_with_newlines(self):
         agent = _bare_agent()
         agent.steer("first note")
         agent.steer("second note")
         agent.steer("third note")
-        assert agent._pending_steer == "first note\nsecond note\nthird note"
+        assert _pending_steer_text(agent) == "first note\nsecond note\nthird note"
+        assert _pending_steer_status(agent) == "pending"
 
 
 class TestSteerDrain:
@@ -88,6 +105,22 @@ class TestSteerDrain:
     def test_drain_on_empty_returns_none(self):
         agent = _bare_agent()
         assert agent._drain_pending_steer() is None
+
+    def test_applied_record_does_not_overwrite_newer_pending_steer(self):
+        agent = _bare_agent()
+        agent.steer("first steer")
+        drained = agent._drain_pending_steer_record()
+        assert drained is not None
+
+        # A second operator steer can arrive while the first drained record is
+        # being injected into the tool message. Marking the first one applied
+        # must not erase the newer pending text.
+        agent.steer("second steer")
+        drained["status"] = "applied"
+        agent._set_pending_steer_record(drained)
+
+        assert _pending_steer_text(agent) == "second steer"
+        assert _pending_steer_status(agent) == "pending"
 
 
 class TestActiveTurnRedirect:
@@ -218,7 +251,8 @@ class TestActiveTurnRedirect:
 
         assert agent.redirect("also check migrations") is True
         assert agent._pending_redirect is None
-        assert agent._pending_steer == "also check migrations"
+        assert _pending_steer_text(agent) == "also check migrations"
+        assert _pending_steer_status(agent) == "pending"
         assert agent._interrupt_requested is False
 
 
@@ -261,8 +295,9 @@ class TestSteerInjection:
         assert "ls output B" in messages[3]["content"]
         assert STEER_MARKER_OPEN in messages[3]["content"]
         assert "please also check auth.log" in messages[3]["content"]
-        # And pending_steer is consumed.
-        assert agent._pending_steer is None
+        # And pending_steer is now marked applied.
+        assert _pending_steer_text(agent) == "please also check auth.log"
+        assert _pending_steer_status(agent) == "applied"
 
     def test_no_op_when_no_steer_pending(self):
         agent = _bare_agent()
@@ -279,7 +314,8 @@ class TestSteerInjection:
         messages = [{"role": "user", "content": "hi"}]
         agent._apply_pending_steer_to_tool_results(messages, num_tool_msgs=0)
         # Steer should remain pending (nothing to drain into)
-        assert agent._pending_steer == "steer"
+        assert _pending_steer_text(agent) == "steer"
+        assert _pending_steer_status(agent) == "pending"
 
     def test_marker_labels_text_as_out_of_band_user_message(self):
         """The injection marker must attribute the appended text to the user
@@ -329,7 +365,8 @@ class TestSteerInjection:
         # Messages untouched
         assert messages[-1]["content"] == "y"
         # And the steer is back in pending so the fallback can grab it
-        assert agent._pending_steer == "ping"
+        assert _pending_steer_text(agent) == "ping"
+        assert _pending_steer_status(agent) == "pending"
 
 
 class TestSteerThreadSafety:
@@ -370,7 +407,8 @@ class TestSteerClearedOnInterrupt:
 
         agent.steer("will be dropped")
         agent._pending_redirect = "also drop this"
-        assert agent._pending_steer == "will be dropped"
+        assert _pending_steer_text(agent) == "will be dropped"
+        assert _pending_steer_status(agent) == "pending"
 
         agent.clear_interrupt()
         assert agent._pending_steer is None
@@ -405,10 +443,14 @@ class TestPreApiCallSteerDrain:
         for _si in range(len(messages) - 1, -1, -1):
             if messages[_si].get("role") == "tool":
                 messages[_si]["content"] += format_steer_marker(_pre_api_steer)
+                # Restored pre-API drain would mark the record as applied
+                agent._set_pending_steer_record(
+                    {"id": None, "text": _pre_api_steer, "status": "applied"}
+                )
                 break
         assert STEER_MARKER_OPEN in messages[-1]["content"]
         assert "focus on error handling" in messages[-1]["content"]
-        assert agent._pending_steer is None
+        assert _pending_steer_status(agent) == "applied"
 
     def test_pre_api_drain_restashes_when_no_tool_message(self):
         """If there are no tool results yet (first iteration), the steer
@@ -428,8 +470,11 @@ class TestPreApiCallSteerDrain:
                 break
         assert not found
         # Restash
-        agent._pending_steer = _pre_api_steer
-        assert agent._pending_steer == "early steer"
+        agent._set_pending_steer_record(
+            {"id": None, "text": _pre_api_steer, "status": "pending"}
+        )
+        assert _pending_steer_text(agent) == "early steer"
+        assert _pending_steer_status(agent) == "pending"
 
     def test_pre_api_drain_finds_tool_msg_past_assistant(self):
         """The pre-API drain should scan backwards past a non-tool message
@@ -451,6 +496,16 @@ class TestPreApiCallSteerDrain:
                 messages[_si]["content"] += format_steer_marker(_pre_api_steer)
                 break
         assert "change approach" in messages[2]["content"]
+
+
+class TestSteerFollowUpTurnFinalization:
+    def test_pending_steer_becomes_contextual_follow_up_prompt(self):
+        follow_up = format_pending_steer_follow_up("pause for step2")
+        assert follow_up.startswith(
+            "Operator steering arrived during the previous active turn but was not seen before"
+        )
+        assert "next priority correction" in follow_up
+        assert follow_up.endswith("pause for step2")
 
 
 class TestSteerMarkerContract:

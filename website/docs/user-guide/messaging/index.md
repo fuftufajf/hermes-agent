@@ -366,7 +366,7 @@ Send a message while the agent is working to correct the active turn:
 By default, messaging a busy agent redirects its active turn. Two other modes are available:
 
 - `queue` — follow-up messages wait and run as the next turn after the current task finishes.
-- `steer` — follow-up messages are injected into the current run via `/steer`, arriving at the agent after the next tool call. No interrupt, no new turn. Falls back to `queue` behavior if the agent hasn't started yet.
+- `steer` — follow-up messages are injected into the current run via `/steer`, arriving after the next tool/pre-API drain point when possible. No interrupt, no new turn when it lands in the active turn; if the turn finishes first, Hermes carries the message into the next turn as the priority correction. Falls back to `queue` behavior if the agent hasn't started yet.
 
 ```yaml
 display:

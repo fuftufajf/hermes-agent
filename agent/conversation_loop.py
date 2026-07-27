@@ -1209,25 +1209,8 @@ def run_conversation(
         # iteration, no tools yet), the steer stays pending for the next
         # tool batch — injecting into a user message would break role
         # alternation, and there's no tool output to piggyback on.
-        _pre_api_steer_record = None
-        _drain_record = getattr(agent, "_drain_pending_steer_record", None)
-        if callable(_drain_record):
-            _pre_api_steer_record = _drain_record()
-        else:
-            _pre_api_steer = agent._drain_pending_steer()
-            if _pre_api_steer:
-                _pre_api_steer_record = {
-                    "id": None,
-                    "text": _pre_api_steer,
-                    "status": "pending",
-                }
-        if _pre_api_steer_record:
-            _pre_api_steer = _pre_api_steer_record.get("text")
-            if _pre_api_steer is None:
-                _pre_api_steer = ""
-            _pre_api_steer_record["text"] = str(_pre_api_steer)
-            _pre_api_steer_record["status"] = "pending"
-        if _pre_api_steer_record and _pre_api_steer:
+        _pre_api_steer = agent._drain_pending_steer()
+        if _pre_api_steer:
             _injected = False
             for _si in range(len(messages) - 1, -1, -1):
                 _sm = messages[_si]
@@ -1237,24 +1220,15 @@ def run_conversation(
                     existing = _sm.get("content", "")
                     if isinstance(existing, str):
                         _sm["content"] = existing + marker
-                        _injected = True
                     else:
                         # Multimodal content blocks — append text block
                         try:
                             blocks = list(existing) if existing else []
                             blocks.append({"type": "text", "text": marker})
                             _sm["content"] = blocks
-                            _injected = True
                         except Exception:
-                            _injected = False
-                    if not _injected:
-                        continue
-                    _pre_api_steer_record["status"] = "applied"
-                    _set_pending = getattr(agent, "_set_pending_steer_record", None)
-                    if callable(_set_pending):
-                        _set_pending(_pre_api_steer_record)
-                    else:
-                        agent._pending_steer = _pre_api_steer_record
+                            pass
+                    _injected = True
                     logger.debug(
                         "Pre-API-call steer drain: injected into tool msg at index %d",
                         _si,
@@ -1263,11 +1237,16 @@ def run_conversation(
             if not _injected:
                 # No tool message to inject into — put it back so
                 # the post-tool-execution drain picks it up later.
-                _set_pending = getattr(agent, "_set_pending_steer_record", None)
-                if callable(_set_pending):
-                    _set_pending(_pre_api_steer_record)
+                _lock = getattr(agent, "_pending_steer_lock", None)
+                if _lock is not None:
+                    with _lock:
+                        if agent._pending_steer:
+                            agent._pending_steer = agent._pending_steer + "\n" + _pre_api_steer
+                        else:
+                            agent._pending_steer = _pre_api_steer
                 else:
-                    agent._pending_steer = _pre_api_steer_record
+                    existing = getattr(agent, "_pending_steer", None)
+                    agent._pending_steer = (existing + "\n" + _pre_api_steer) if existing else _pre_api_steer
 
         # Prepare messages for API call
         # If we have an ephemeral system prompt, prepend it to the messages

@@ -252,7 +252,7 @@ personalities:
 |------|----------|
 | `"interrupt"`（默认） | 你的消息中断当前操作并立即处理 |
 | `"queue"` | 你的消息被静默排队，在 agent 完成后作为下一轮发送 |
-| `"steer"` | 你的消息通过 `/steer` 注入当前运行，尽可能在下一次工具/pre-API drain 点后到达 agent；如果当前 turn 先结束，则作为下一轮优先纠偏消息送达 |
+| `"steer"` | 你的消息通过 `/steer` 注入当前运行，在下一次工具调用后到达 agent——不中断，不开启新轮次 |
 
 ```yaml
 # ~/.hermes/config.yaml

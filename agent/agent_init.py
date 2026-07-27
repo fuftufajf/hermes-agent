@@ -774,7 +774,7 @@ def init_agent(
     # last tool result's content so the model sees it on its next
     # iteration. Message-role alternation is preserved (we modify an
     # existing tool message rather than inserting a new user turn).
-    agent._pending_steer: Optional[Dict[str, Any]] = None
+    agent._pending_steer: Optional[str] = None
     agent._pending_steer_lock = threading.Lock()
 
     # Active-turn redirect mechanism. A regular follow-up sent while the model

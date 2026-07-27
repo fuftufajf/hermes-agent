@@ -281,7 +281,7 @@ gateway:
 默认情况下，向繁忙的 agent 发送消息会中断它。另有两种模式可用：
 
 - `queue` — 后续消息等待，在当前任务完成后作为下一轮运行。
-- `steer` — 后续消息通过 `/steer` 注入当前运行，尽可能在下一次工具/pre-API drain 点后到达 agent。能落在当前 turn 时不中断、不开新轮次；如果当前 turn 先结束，Hermes 会把它作为下一轮优先纠偏消息送达。如果 agent 尚未开始，则回退为 `queue` 行为。
+- `steer` — 后续消息通过 `/steer` 注入当前运行，在下一次工具调用后到达 agent。不中断，不开新轮次。如果 agent 尚未开始，则回退为 `queue` 行为。
 
 ```yaml
 display:

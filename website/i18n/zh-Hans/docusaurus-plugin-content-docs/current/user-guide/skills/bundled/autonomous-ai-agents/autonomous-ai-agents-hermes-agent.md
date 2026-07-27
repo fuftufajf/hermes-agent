@@ -262,7 +262,7 @@ hermes uninstall            Uninstall Hermes
 /snapshot [sub]      Create or restore state snapshots of Hermes config/state (CLI)
 /background <prompt> Run prompt in background
 /queue <prompt>      Queue for next turn
-/steer <prompt>      Inject at the next tool/pre-API drain; carry to next turn if needed
+/steer <prompt>      Inject a message after the next tool call without interrupting
 /agents (/tasks)     Show active agents and running tasks
 /resume [name]       Resume a named session
 /goal [text|sub]     Set a standing goal Hermes works on across turns until achieved

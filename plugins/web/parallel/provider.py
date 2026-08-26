@@ -136,8 +136,19 @@ _get_parallel_client = _get_sync_client
 _get_async_parallel_client = _get_async_client
 
 
-def _resolve_search_mode() -> str:
-    """Return the validated PARALLEL_SEARCH_MODE value (default "agentic")."""
+def _resolve_search_mode(override: str = None) -> str:
+    """Return the Parallel search mode for one call.
+
+    A per-call *override* wins: neutral ``fast``/``deep`` map to Parallel's
+    ``fast``/``agentic``; native ``one-shot``/``agentic`` pass through.
+    Otherwise the ``PARALLEL_SEARCH_MODE`` env default (``agentic``).
+    """
+    if override:
+        mapped = {"fast": "fast", "deep": "agentic"}.get(
+            override.lower().strip(), override.lower().strip()
+        )
+        if mapped in {"fast", "one-shot", "agentic"}:
+            return mapped
     mode = os.getenv("PARALLEL_SEARCH_MODE", "agentic").lower().strip()
     if mode not in {"fast", "one-shot", "agentic"}:
         mode = "agentic"
@@ -183,11 +194,15 @@ class ParallelWebSearchProvider(WebSearchProvider):
     def supports_extract(self) -> bool:
         return True
 
-    def search(self, query: str, limit: int = 5) -> Dict[str, Any]:
+    def supported_search_options(self) -> frozenset:
+        return frozenset({"mode"})
+
+    def search(self, query: str, limit: int = 5, mode: str = None) -> Dict[str, Any]:
         """Execute a Parallel search (sync).
 
-        Uses the ``beta.search`` endpoint with the configured mode
-        (``PARALLEL_SEARCH_MODE`` env var, default "agentic"). Limit is
+        Uses the ``beta.search`` endpoint. Per-call ``mode`` (neutral
+        ``fast``/``deep``, or native ``one-shot``/``agentic``) wins over
+        the ``PARALLEL_SEARCH_MODE`` env default ("agentic"). Limit is
         capped at 20 server-side.
         """
         try:
@@ -205,9 +220,14 @@ class ParallelWebSearchProvider(WebSearchProvider):
                 logger.info(
                     "Parallel keyless search: '%s' (limit=%d)", query, limit
                 )
-                return search_with_failover("parallel", query, limit)
+                result = search_with_failover("parallel", query, limit)
+                if mode:
+                    result.setdefault("warnings", []).append(
+                        "parallel keyless tier ignores the mode option"
+                    )
+                return result
 
-            mode = _resolve_search_mode()
+            mode = _resolve_search_mode(mode)
             logger.info(
                 "Parallel search: '%s' (mode=%s, limit=%d)", query, mode, limit
             )

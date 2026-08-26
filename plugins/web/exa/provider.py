@@ -128,12 +128,25 @@ class ExaWebSearchProvider(WebSearchProvider):
     def supports_extract(self) -> bool:
         return True
 
-    def search(self, query: str, limit: int = 5) -> Dict[str, Any]:
+    def supported_search_options(self) -> frozenset:
+        return frozenset({"time_range", "include_domains", "exclude_domains"})
+
+    def search(
+        self,
+        query: str,
+        limit: int = 5,
+        time_range: str = None,
+        include_domains: List[str] = None,
+        exclude_domains: List[str] = None,
+    ) -> Dict[str, Any]:
         """Execute an Exa search.
 
-        Returns ``{"success": True, "data": {"web": [{...}, ...]}}`` on
-        success, ``{"success": False, "error": str}`` on failure (incl.
-        missing API key and SDK install errors).
+        Keyed path uses Exa's ``auto`` (semantic + keyword) type with
+        highlights; ``time_range`` maps to ``start_published_date`` and
+        the domain filters pass through natively. Returns
+        ``{"success": True, "data": {"web": [{...}, ...]}}`` on success,
+        ``{"success": False, "error": str}`` on failure (incl. missing
+        API key and SDK install errors).
         """
         try:
             from tools.interrupt import is_interrupted
@@ -150,14 +163,48 @@ class ExaWebSearchProvider(WebSearchProvider):
                 logger.info(
                     "Exa keyless search: '%s' (limit=%d)", query, limit
                 )
-                return search_with_failover("exa", query, limit)
+                result = search_with_failover("exa", query, limit)
+                dropped = sorted(
+                    k for k, v in (
+                        ("time_range", time_range),
+                        ("include_domains", include_domains),
+                        ("exclude_domains", exclude_domains),
+                    ) if v
+                )
+                if dropped:
+                    result.setdefault("warnings", []).append(
+                        "exa keyless tier ignores search options: "
+                        + ", ".join(dropped)
+                    )
+                return result
+
+            warnings: List[str] = []
+            search_kwargs: Dict[str, Any] = {
+                "type": "auto",
+                "num_results": limit,
+                "contents": {"highlights": True},
+            }
+            if time_range:
+                days = {"day": 1, "week": 7, "month": 30, "year": 365}.get(time_range)
+                if days:
+                    from datetime import datetime, timedelta, timezone
+
+                    start = datetime.now(timezone.utc) - timedelta(days=days)
+                    search_kwargs["start_published_date"] = (
+                        start.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+                    )
+                else:
+                    warnings.append(
+                        f"exa: unknown time_range '{time_range}' ignored "
+                        "(use day|week|month|year)"
+                    )
+            if include_domains:
+                search_kwargs["include_domains"] = [str(d) for d in include_domains]
+            if exclude_domains:
+                search_kwargs["exclude_domains"] = [str(d) for d in exclude_domains]
 
             logger.info("Exa search: '%s' (limit=%d)", query, limit)
-            response = _get_exa_client().search(
-                query,
-                num_results=limit,
-                contents={"highlights": True},
-            )
+            response = _get_exa_client().search(query, **search_kwargs)
 
             web_results = []
             for i, result in enumerate(response.results or []):
@@ -171,7 +218,10 @@ class ExaWebSearchProvider(WebSearchProvider):
                     }
                 )
 
-            return {"success": True, "data": {"web": web_results}}
+            out: Dict[str, Any] = {"success": True, "data": {"web": web_results}}
+            if warnings:
+                out["warnings"] = warnings
+            return out
         except ValueError as exc:
             # Raised by _get_exa_client when EXA_API_KEY missing
             return {"success": False, "error": str(exc)}

@@ -142,6 +142,18 @@ class WebSearchProvider(abc.ABC):
         """
         return False
 
+    def supported_search_options(self) -> frozenset:
+        """Names of optional ``web_search`` parameters this provider maps natively.
+
+        The dispatcher only forwards an option (``mode``, ``topic``,
+        ``time_range``, ``include_domains``, ``exclude_domains``) to
+        :meth:`search` when its name is in this set; unsupported options are
+        dropped and surfaced as a warning in the tool response metadata —
+        never silently faked. Providers that declare an option MUST accept
+        it as a keyword argument on :meth:`search`. Default: none.
+        """
+        return frozenset()
+
     def supports_extract(self) -> bool:
         """Return True if this provider implements :meth:`extract`.
 

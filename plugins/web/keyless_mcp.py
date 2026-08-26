@@ -160,7 +160,11 @@ def _parse_mcp_body(body: str) -> str:
         except json.JSONDecodeError:
             pass
 
-    for line in body.splitlines():
+    # split("\n"), NOT splitlines(): UTF-8 payload bytes mis-decoded as
+    # Latin-1 contain C1 control chars (e.g. "ą" = C4 85 → "Ä\x85"), and
+    # \x85 is a line boundary for splitlines() — it would cut the SSE
+    # ``data:`` JSON mid-string on any Polish/diacritic text.
+    for line in body.split("\n"):
         if not line.startswith("data: "):
             continue
         try:
@@ -205,7 +209,11 @@ def mcp_call(
         raise KeylessMCPError(
             f"HTTP {response.status_code}: {response.text[:300]}"
         )
-    return _parse_mcp_body(response.text)
+    # Decode as UTF-8 ourselves: MCP endpoints answer text/event-stream
+    # with no charset, so requests falls back to ISO-8859-1 and mangles
+    # every non-ASCII character (Exa UTF-8 bug — Polish diacritics,
+    # typographic quotes, dashes).
+    return _parse_mcp_body(response.content.decode("utf-8", errors="replace"))
 
 
 # ---------------------------------------------------------------------------
@@ -755,15 +763,27 @@ _KEYLESS_EXTRACTORS = {
 _ring_lock = __import__("threading").Lock()
 _ring_cursor = int(_SESSION_ID, 16) % len(_KEYLESS_RING)
 
+# Per-call explicit vendor choice (web_search/web_extract ``backend``
+# parameter). Set by the tool dispatcher around one dispatch so the ring
+# starts at the vendor the caller actually named instead of the rotation
+# cursor. ContextVar → survives asyncio.to_thread and never leaks across
+# concurrent calls.
+from contextvars import ContextVar
+
+_explicit_vendor: "ContextVar[str]" = ContextVar("keyless_explicit_vendor", default="")
+
 
 def _vendor_pinned(name: str) -> bool:
     """True when config explicitly routes web traffic to *name*.
 
     A pinned vendor starts every keyless request (rotation off); the ring
     is only walked past it on throttle. Pin signals: web.backend /
-    web.search_backend / web.extract_backend naming the vendor, or a
-    free-tier pin in web.provider_tier.
+    web.search_backend / web.extract_backend naming the vendor, a
+    free-tier pin in web.provider_tier, or an explicit per-call
+    ``backend`` choice (``_explicit_vendor``).
     """
+    if name and name == _explicit_vendor.get():
+        return True
     if provider_tier(name) == "free":
         return True
     try:
@@ -825,15 +845,19 @@ def search_with_failover(name: str, query: str, limit: int = 5) -> Dict[str, Any
                 result.setdefault("data", {})["served_by"] = vendor
             return result
         last = result
-        if not _is_rate_limitish(result.get("error", "")):
-            return result
+        # Walk on ANY failure, not just throttling: a vendor-specific
+        # defect (malformed response shape, endpoint change) used to stop
+        # the walk here and kill the whole rescue on its first link. Cost:
+        # a genuinely malformed query retries a few vendors — rare and
+        # cheap next to losing the rescue entirely.
         nxt = order[i + 1] if i + 1 < len(order) else None
         if nxt:
             logger.info(
-                "keyless %s search throttled; failing over to %s", vendor, nxt
+                "keyless %s search failed (%s); failing over to %s",
+                vendor, str(result.get("error", ""))[:120], nxt,
             )
     last["error"] = (
-        f"{last.get('error', '')} (all keyless vendors throttled: "
+        f"{last.get('error', '')} (all keyless vendors failed: "
         f"{', '.join(order)})"
     )
     return last
@@ -843,8 +867,8 @@ def extract_with_failover(name: str, urls: List[str]) -> List[Dict[str, Any]]:
     """Keyless extract across the vendor ring, failing over per-batch.
 
     Advances to the next ring vendor only when EVERY url in a batch comes
-    back with a rate-limit-shaped error — partial failures are page
-    problems, not throttling, and return as-is.
+    back with an error — partial failures are page problems, not a vendor
+    outage, and return as-is.
     """
     order = _ring_order(name)
     if not order:
@@ -857,15 +881,17 @@ def extract_with_failover(name: str, urls: List[str]) -> List[Dict[str, Any]]:
     for i, vendor in enumerate(order):
         results = _KEYLESS_EXTRACTORS[vendor](list(urls))
         errors = [r.get("error", "") for r in results]
-        all_throttled = bool(results) and all(
-            e and _is_rate_limitish(e) for e in errors
-        )
-        if not all_throttled:
+        # Walk on a whole-batch failure of ANY shape (throttle, endpoint
+        # defect, transport error) — a broken first vendor must not kill
+        # the whole rescue. Partial success still returns immediately.
+        all_failed = bool(results) and all(e for e in errors)
+        if not all_failed:
             return results
         last = results
         nxt = order[i + 1] if i + 1 < len(order) else None
         if nxt:
             logger.info(
-                "keyless %s extract throttled; failing over to %s", vendor, nxt
+                "keyless %s extract failed whole batch (%s); failing over to %s",
+                vendor, str(errors[0])[:120], nxt,
             )
     return last

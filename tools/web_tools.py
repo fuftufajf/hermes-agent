@@ -40,6 +40,7 @@ import json
 import logging
 import os
 import re
+import time
 import asyncio
 from typing import List, Dict, Any, Optional, TYPE_CHECKING
 import httpx  # noqa: F401 — kept at module top so tests can patch tools.web_tools.httpx
@@ -520,6 +521,34 @@ def _rescue_search(provider_name: str, original_error: str, query: str, limit: i
     }
 
 
+from contextlib import contextmanager
+
+
+@contextmanager
+def _explicit_vendor_scope(backend: str):
+    """Mark one dispatch as an explicit per-call vendor choice.
+
+    Sets ``plugins.web.keyless_mcp._explicit_vendor`` so a keyless-tier
+    call for that vendor starts the ring AT the named vendor instead of
+    the rotation cursor — an explicit ``backend=exa`` must actually reach
+    Exa. No-op when no backend was requested or the ring is unavailable.
+    """
+    token = None
+    ctx = None
+    if backend:
+        try:
+            from plugins.web.keyless_mcp import _explicit_vendor as ctx
+
+            token = ctx.set(backend)
+        except Exception as exc:  # noqa: BLE001 — ring optional
+            logger.debug("explicit vendor scope unavailable: %s", exc)
+    try:
+        yield
+    finally:
+        if ctx is not None and token is not None:
+            ctx.reset(token)
+
+
 def _policy_blocked_result(result: dict) -> bool:
     """True when an extract result failed because of the user's website
     policy — an intentional refusal, never a backend outage. Policy blocks
@@ -835,39 +864,42 @@ def _ensure_web_plugins_loaded() -> None:
         logger.warning("Web plugin discovery failed (non-fatal): %s", exc)
 
 
-def web_search_tool(query: str, limit: int = 5) -> str:
+def web_search_tool(
+    query: str,
+    limit: int = 5,
+    backend: Optional[str] = None,
+    mode: Optional[str] = None,
+    topic: Optional[str] = None,
+    time_range: Optional[str] = None,
+    include_domains: Optional[List[str]] = None,
+    exclude_domains: Optional[List[str]] = None,
+) -> str:
     """
     Search the web for information using available search API backend.
 
-    This function provides a generic interface for web search that can work
-    with multiple backends (Parallel or Firecrawl).
+    Note: This function returns search result metadata only (URLs, titles,
+    descriptions). Use web_extract_tool to get full content from specific URLs.
 
-    Note: This function returns search result metadata only (URLs, titles, descriptions).
-    Use web_extract_tool to get full content from specific URLs.
-    
     Args:
         query (str): The search query to look up
         limit (int): Maximum number of results to return (default: 5)
-    
+        backend (str): Per-call backend override. Must name a registered
+            search-capable provider; applies to THIS call only and never
+            mutates configuration. Unknown/incapable names return a clear
+            error naming the backend — no silent switch.
+        mode (str): "fast" | "deep" — mapped to the backend's native depth
+            (Tavily search_depth, Parallel agentic mode) where supported.
+        topic (str): "general" | "news" | "finance" (Tavily).
+        time_range (str): "day" | "week" | "month" | "year".
+        include_domains / exclude_domains (list[str]): domain filters.
+
+    Options a backend does not declare via ``supported_search_options()``
+    are dropped and reported in ``meta.warnings`` — never silently faked.
+
     Returns:
-        str: JSON string containing search results with the following structure:
-             {
-                 "success": bool,
-                 "data": {
-                     "web": [
-                         {
-                             "title": str,
-                             "url": str,
-                             "description": str,
-                             "position": int
-                         },
-                         ...
-                     ]
-                 }
-             }
-    
-    Raises:
-        Exception: If search fails or API key is not set
+        str: JSON string ``{"success", "data": {"web": [...]}, "meta": {...}}``
+        where ``meta`` carries requested_backend, served_by, mode,
+        result_count, elapsed_s, warnings, and rescue info.
     """
     try:
         limit = int(limit)
@@ -875,25 +907,40 @@ def web_search_tool(query: str, limit: int = 5) -> str:
         limit = 5
     limit = min(max(limit, 1), 100)
 
+    requested_backend = (backend or "").lower().strip()
+    requested_options: Dict[str, Any] = {
+        key: value
+        for key, value in (
+            ("mode", mode),
+            ("topic", topic),
+            ("time_range", time_range),
+            ("include_domains", include_domains),
+            ("exclude_domains", exclude_domains),
+        )
+        if value
+    }
+
     debug_call_data = {
         "parameters": {
             "query": query,
-            "limit": limit
+            "limit": limit,
+            "backend": requested_backend or None,
+            "options": requested_options,
         },
         "error": None,
         "results_count": 0,
         "original_response_size": 0,
         "final_response_size": 0
     }
-    
+
     try:
         from tools.interrupt import is_interrupted
         if is_interrupted():
             return tool_error("Interrupted", success=False)
 
-        # Dispatch through the web search registry. All 7 providers
-        # (brave-free, ddgs, searxng, exa, parallel, tavily, firecrawl)
-        # now live as plugins; the dispatcher is just a registry lookup +
+        # Dispatch through the web search registry. All providers
+        # (brave-free, ddgs, searxng, exa, parallel, tavily, firecrawl, …)
+        # live as plugins; the dispatcher is just a registry lookup +
         # delegation. Sync only — every provider's search() is sync.
         _ensure_web_plugins_loaded()
         from agent.web_search_registry import (
@@ -902,91 +949,171 @@ def web_search_tool(query: str, limit: int = 5) -> str:
             _disabled_web_plugin_for,
         )
 
-        backend = _get_search_backend()
-        provider = _wsp_get_provider(backend) if backend else None
-        if provider is None or not provider.supports_search():
-            from tools.tool_backend_helpers import (
-                selection_error,
-                selection_exists,
-            )
+        t0 = time.monotonic()
+        warnings: List[str] = []
+        response_data: Optional[Dict[str, Any]] = None
+        provider = None
 
-            if provider is None and backend and selection_exists("web"):
+        if requested_backend:
+            # Per-call override — strict: this call only, no config
+            # mutation, resolved through the same registry as configured
+            # backends. Unknown or search-incapable names error by name.
+            provider = _wsp_get_provider(requested_backend)
+            if provider is None:
+                names = ", ".join(
+                    sorted(p.name for p in _list_registered_web_providers())
+                ) or "none registered"
+                response_data = {
+                    "success": False,
+                    "error": (
+                        f"Unknown web search backend '{requested_backend}'. "
+                        f"Registered backends: {names}."
+                    ),
+                }
+                provider = None
+            elif not provider.supports_search():
+                response_data = {
+                    "success": False,
+                    "error": (
+                        f"{provider.display_name} does not support search "
+                        "(extract-only backend). Pick a search-capable "
+                        "backend or omit the backend parameter."
+                    ),
+                }
+                provider = None
+        else:
+            configured = _get_search_backend()
+            provider = _wsp_get_provider(configured) if configured else None
+            if provider is None or not provider.supports_search():
+                from tools.tool_backend_helpers import (
+                    selection_error,
+                    selection_exists,
+                )
+
+                if provider is None and configured and selection_exists("web"):
+                    disabled_key = _disabled_web_plugin_for(capability="search")
+                    if disabled_key:
+                        _vendor = disabled_key.split("/", 1)[-1]
+                        error_text = (
+                            f"web.search_backend is set to '{_vendor}', but its "
+                            f"plugin ('{disabled_key}') is disabled in config. "
+                            f"Re-enable it with `hermes plugins enable {disabled_key}` "
+                            "(or remove it from plugins.disabled)."
+                        )
+                    else:
+                        error_text = selection_error(
+                            "web",
+                            f"'{configured}'",
+                            "no registered web search provider has that name",
+                        )
+                    response_data = {"success": False, "error": error_text}
+                    provider = None
+                else:
+                    # Never-configured install: fall back to the
+                    # availability-walked active provider (legacy autodetect).
+                    provider = get_active_search_provider()
+
+            if provider is None and response_data is None:
+                # A bundled web plugin the user explicitly disabled looks
+                # identical to "no provider" here — point at the real cause
+                # (re-enable the plugin) rather than a generic setup hint.
                 disabled_key = _disabled_web_plugin_for(capability="search")
                 if disabled_key:
                     _vendor = disabled_key.split("/", 1)[-1]
-                    error_text = (
-                        f"web.search_backend is set to '{_vendor}', but its "
-                        f"plugin ('{disabled_key}') is disabled in config. "
-                        f"Re-enable it with `hermes plugins enable {disabled_key}` "
-                        "(or remove it from plugins.disabled)."
-                    )
+                    response_data = {
+                        "success": False,
+                        "error": (
+                            f"web.search_backend is set to '{_vendor}', but its "
+                            f"plugin ('{disabled_key}') is disabled in config. "
+                            f"Re-enable it with `hermes plugins enable {disabled_key}` "
+                            "(or remove it from plugins.disabled)."
+                        ),
+                    }
                 else:
-                    error_text = selection_error(
-                        "web",
-                        f"'{backend}'",
-                        "no registered web search provider has that name",
-                    )
-                response_data = {"success": False, "error": error_text}
-                result_json = json.dumps(response_data, indent=2, ensure_ascii=False)
-                debug_call_data["error"] = error_text
-                _debug.log_call("web_search_tool", debug_call_data)
-                _debug.save()
-                return result_json
-            # Never-configured install: fall back to the availability-walked
-            # active provider (legacy autodetect behavior).
-            provider = get_active_search_provider()
+                    response_data = {
+                        "success": False,
+                        "error": (
+                            "No web search provider configured. "
+                            "Run `hermes tools` to set one up."
+                        ),
+                    }
 
-        if provider is None:
-            # A bundled web plugin the user explicitly disabled looks
-            # identical to "no provider" here — point at the real cause
-            # (re-enable the plugin) rather than a generic setup hint.
-            disabled_key = _disabled_web_plugin_for(capability="search")
-            if disabled_key:
-                _vendor = disabled_key.split("/", 1)[-1]
-                response_data = {
-                    "success": False,
-                    "error": (
-                        f"web.search_backend is set to '{_vendor}', but its "
-                        f"plugin ('{disabled_key}') is disabled in config. "
-                        f"Re-enable it with `hermes plugins enable {disabled_key}` "
-                        "(or remove it from plugins.disabled)."
-                    ),
-                }
-            else:
-                response_data = {
-                    "success": False,
-                    "error": (
-                        "No web search provider configured. "
-                        "Run `hermes tools` to set one up."
-                    ),
-                }
-        else:
+        if response_data is None and provider is not None:
+            # Forward only the options this provider declares; drop the
+            # rest with a visible warning instead of faking support.
+            passed_options: Dict[str, Any] = {}
+            if requested_options:
+                try:
+                    supported = frozenset(provider.supported_search_options())
+                except Exception as exc:  # noqa: BLE001 — declare nothing
+                    logger.debug(
+                        "provider %r.supported_search_options() raised: %s",
+                        provider.name, exc,
+                    )
+                    supported = frozenset()
+                for key, value in requested_options.items():
+                    if key in supported:
+                        passed_options[key] = value
+                    else:
+                        warnings.append(
+                            f"backend '{provider.name}' does not support "
+                            f"option '{key}' (ignored)"
+                        )
             logger.info(
-                "Web search via %s: '%s' (limit: %d)",
+                "Web search via %s: '%s' (limit: %d%s)",
                 provider.name, query, limit,
+                f", options: {sorted(passed_options)}" if passed_options else "",
             )
-            try:
-                response_data = provider.search(query, limit)
-            except Exception as exc:  # noqa: BLE001 — candidate for rescue
-                if _rescue_eligible(provider):
-                    response_data = _rescue_search(
-                        provider.name, str(exc), query, limit
-                    )
+            with _explicit_vendor_scope(requested_backend):
+                try:
+                    response_data = provider.search(query, limit, **passed_options)
+                except Exception as exc:  # noqa: BLE001 — candidate for rescue
+                    if _rescue_eligible(provider):
+                        response_data = _rescue_search(
+                            provider.name, str(exc), query, limit
+                        )
+                    else:
+                        raise
                 else:
-                    raise
-            else:
-                if (
-                    not response_data.get("success")
-                    and _rescue_eligible(provider)
-                ):
-                    # One-shot keyless rescue: THIS call rides the free-tier
-                    # ring; the next call attempts the chosen backend again.
-                    response_data = _rescue_search(
-                        provider.name,
-                        str(response_data.get("error", "")),
-                        query,
-                        limit,
-                    )
+                    if (
+                        not response_data.get("success")
+                        and _rescue_eligible(provider)
+                    ):
+                        # One-shot keyless rescue: THIS call rides the
+                        # free-tier ring; the next call attempts the chosen
+                        # backend again.
+                        response_data = _rescue_search(
+                            provider.name,
+                            str(response_data.get("error", "")),
+                            query,
+                            limit,
+                        )
+
+        # Response metadata (card Etap 3): requested_backend, served_by,
+        # mode, result count, elapsed time, warnings, rescue info.
+        if isinstance(response_data, dict):
+            provider_warnings = response_data.pop("warnings", None)
+            if provider_warnings:
+                warnings.extend(str(w) for w in provider_warnings)
+            data_section = (
+                response_data.get("data")
+                if isinstance(response_data.get("data"), dict) else {}
+            )
+            meta: Dict[str, Any] = {
+                "requested_backend": requested_backend or None,
+                "served_by": data_section.get("served_by") or (
+                    getattr(provider, "name", None)
+                    if response_data.get("success") else None
+                ),
+                "mode": requested_options.get("mode"),
+                "result_count": len(data_section.get("web") or []),
+                "elapsed_s": round(time.monotonic() - t0, 2),
+            }
+            if data_section.get("rescued_from"):
+                meta["rescued_from"] = data_section["rescued_from"]
+            if warnings:
+                meta["warnings"] = warnings
+            response_data["meta"] = meta
 
         debug_call_data["results_count"] = len(response_data.get("data", {}).get("web", []))
         result_json = json.dumps(response_data, indent=2, ensure_ascii=False)
@@ -1006,10 +1133,53 @@ def web_search_tool(query: str, limit: int = 5) -> str:
         return tool_error(error_msg)
 
 
+async def _dispatch_extract(provider, safe_urls: List[str], format) -> List[Dict[str, Any]]:
+    """Run one provider's extract() (sync or async) with one-shot rescue.
+
+    Async-or-sync dispatch: parallel + firecrawl have async extract();
+    exa + tavily are sync (run in a thread so the event loop stays
+    responsive). A whole-batch failure of a rescue-eligible backend rides
+    the keyless ring once — stateless, the next call uses the chosen
+    backend again.
+    """
+    import inspect
+
+    logger.info(
+        "Web extract via %s: %d URL(s)", provider.name, len(safe_urls)
+    )
+    try:
+        if inspect.iscoroutinefunction(provider.extract):
+            results = await provider.extract(safe_urls, format=format)
+        else:
+            results = await asyncio.to_thread(
+                provider.extract, safe_urls, format=format
+            )
+    except Exception as exc:  # noqa: BLE001 — candidate for rescue
+        if _rescue_eligible(provider):
+            failed = [
+                {"url": u, "title": "", "content": "", "error": str(exc)}
+                for u in safe_urls
+            ]
+            return await asyncio.to_thread(
+                _rescue_extract, provider.name, safe_urls, failed
+            )
+        raise
+    if (
+        results
+        and all(r.get("error") for r in results)
+        and _rescue_eligible(provider)
+    ):
+        return await asyncio.to_thread(
+            _rescue_extract, provider.name, safe_urls, results
+        )
+    return results
+
+
 async def web_extract_tool(
     urls: List[Any],
     format: str = None,
     char_limit: Optional[int] = None,
+    backend: Optional[str] = None,
 ) -> str:
     """
     Extract content from specific web pages using available extraction API backend.
@@ -1028,6 +1198,10 @@ async def web_extract_tool(
         format (str): Desired output format ("markdown" or "html", optional)
         char_limit (Optional[int]): Per-page char budget sent to the model
             (default: web.extract_char_limit or 15000). Larger pages truncate.
+        backend (Optional[str]): Per-call backend override. Must name a
+            registered extract-capable provider; applies to THIS call only
+            and never mutates configuration. Unknown or search-only names
+            return a clear error naming the backend — no silent switch.
 
     Security: URLs are checked for embedded secrets before fetching.
 
@@ -1085,11 +1259,14 @@ async def web_extract_tool(
         normalized_urls.append(normalized_url)
         normalized_indices.append(index)
 
+    requested_backend = (backend or "").lower().strip()
+
     debug_call_data = {
         "parameters": {
             "urls": normalized_urls,
             "format": format,
             "char_limit": char_limit,
+            "backend": requested_backend or None,
         },
         "error": None,
         "pages_extracted": 0,
@@ -1102,6 +1279,8 @@ async def web_extract_tool(
     
     try:
         logger.info("Extracting content from %d URL(s)", len(normalized_urls))
+        t0 = time.monotonic()
+        provider = None
 
         # ── SSRF protection — filter out private/internal URLs before any backend ──
         safe_urls = []
@@ -1117,11 +1296,53 @@ async def web_extract_tool(
                 safe_urls.append(url)
                 safe_indices.append(index)
 
-        # Dispatch only safe URLs to the configured backend
+        # Dispatch only safe URLs to the selected backend
         if not safe_urls:
             results = []
+        elif requested_backend:
+            # Per-call override — strict: this call only, no config
+            # mutation, resolved through the same registry as configured
+            # backends. Unknown or search-only names error by name.
+            _ensure_web_plugins_loaded()
+            from agent.web_search_registry import (
+                get_provider as _wsp_get_provider,
+            )
+
+            provider = _wsp_get_provider(requested_backend)
+            if provider is None:
+                names = ", ".join(
+                    sorted(p.name for p in _list_registered_web_providers())
+                ) or "none registered"
+                return json.dumps(
+                    {
+                        "success": False,
+                        "error": (
+                            f"Unknown web extract backend "
+                            f"'{requested_backend}'. Registered backends: "
+                            f"{names}."
+                        ),
+                        "meta": {"requested_backend": requested_backend},
+                    },
+                    ensure_ascii=False,
+                )
+            if not provider.supports_extract():
+                return json.dumps(
+                    {
+                        "success": False,
+                        "error": (
+                            f"{provider.display_name} is a search-only "
+                            "backend and cannot extract URL content. Pick "
+                            "an extract-capable backend (parallel, tavily, "
+                            "exa, firecrawl) or omit the backend parameter."
+                        ),
+                        "meta": {"requested_backend": requested_backend},
+                    },
+                    ensure_ascii=False,
+                )
+            with _explicit_vendor_scope(requested_backend):
+                results = await _dispatch_extract(provider, safe_urls, format)
         else:
-            backend = _get_extract_backend()
+            configured = _get_extract_backend()
 
             # All seven providers (brave-free, ddgs, searxng, exa, parallel,
             # tavily, firecrawl) now live as plugins. The dispatcher is a
@@ -1137,7 +1358,7 @@ async def web_extract_tool(
                 _disabled_web_plugin_for,
             )
 
-            provider = _wsp_get_provider(backend) if backend else None
+            provider = _wsp_get_provider(configured) if configured else None
             if provider is None or not provider.supports_extract():
                 # When the configured name IS registered but doesn't support
                 # extract (search-only providers like brave-free / ddgs /
@@ -1163,7 +1384,7 @@ async def web_extract_tool(
                     selection_exists,
                 )
 
-                if backend and selection_exists("web"):
+                if configured and selection_exists("web"):
                     # Strict selection: a stored-but-unregistered backend
                     # errors by name instead of silently switching to
                     # whatever the availability walk finds.
@@ -1180,7 +1401,7 @@ async def web_extract_tool(
                     else:
                         error_text = selection_error(
                             "web",
-                            f"'{backend}'",
+                            f"'{configured}'",
                             "no registered web extract provider has that name",
                         )
                     return json.dumps(
@@ -1222,45 +1443,7 @@ async def web_extract_tool(
                         ensure_ascii=False,
                     )
 
-            logger.info(
-                "Web extract via %s: %d URL(s)", provider.name, len(safe_urls)
-            )
-
-            # Async-or-sync dispatch: parallel + firecrawl have async
-            # extract(); exa + tavily are sync.
-            import inspect
-            try:
-                if inspect.iscoroutinefunction(provider.extract):
-                    results = await provider.extract(safe_urls, format=format)
-                else:
-                    # Run sync extract() in a thread so we don't block the
-                    # event loop on network I/O.
-                    results = await asyncio.to_thread(
-                        provider.extract, safe_urls, format=format
-                    )
-            except Exception as exc:  # noqa: BLE001 — candidate for rescue
-                if _rescue_eligible(provider):
-                    failed = [
-                        {"url": u, "title": "", "content": "", "error": str(exc)}
-                        for u in safe_urls
-                    ]
-                    results = await asyncio.to_thread(
-                        _rescue_extract, provider.name, safe_urls, failed
-                    )
-                else:
-                    raise
-            else:
-                # One-shot keyless rescue when the WHOLE batch failed
-                # (backend-level outage, not per-page problems). Stateless:
-                # the next web_extract call uses the chosen backend again.
-                if (
-                    results
-                    and all(r.get("error") for r in results)
-                    and _rescue_eligible(provider)
-                ):
-                    results = await asyncio.to_thread(
-                        _rescue_extract, provider.name, safe_urls, results
-                    )
+            results = await _dispatch_extract(provider, safe_urls, format)
 
         # Reconstruct the original input order across invalid, blocked, and
         # provider-processed entries. Providers are expected to preserve the
@@ -1333,7 +1516,27 @@ async def web_extract_tool(
             }
             for r in response.get("results", [])
         ]
-        trimmed_response = {"results": trimmed_results}
+        # Response metadata (card Etap 3): requested backend, serving
+        # provider, elapsed time, rescue info. Per-result rescued_from
+        # lives in metadata which trimming drops — surface it here.
+        rescued_from = next(
+            (
+                r["metadata"]["rescued_from"]
+                for r in response.get("results", [])
+                if isinstance(r.get("metadata"), dict)
+                and r["metadata"].get("rescued_from")
+            ),
+            None,
+        )
+        meta: Dict[str, Any] = {
+            "requested_backend": requested_backend or None,
+            "served_by": getattr(provider, "name", None),
+            "result_count": len(trimmed_results),
+            "elapsed_s": round(time.monotonic() - t0, 2),
+        }
+        if rescued_from:
+            meta["rescued_from"] = rescued_from
+        trimmed_response = {"results": trimmed_results, "meta": meta}
 
         if trimmed_response.get("results") == []:
             result_json = tool_error("Content was inaccessible or not found")
@@ -1545,6 +1748,35 @@ WEB_SEARCH_SCHEMA = {
                 "minimum": 1,
                 "maximum": 100,
                 "default": 5
+            },
+            "backend": {
+                "type": "string",
+                "description": "Per-call backend override (e.g. tavily, parallel, exa, brave-free, ddgs). Applies to this call only — never changes configuration. Use for hard research needing a second independent index; omit for normal queries. Unknown or search-incapable names return an error naming the backend."
+            },
+            "mode": {
+                "type": "string",
+                "enum": ["fast", "deep"],
+                "description": "Search depth where the backend supports it: 'deep' maps to Tavily advanced search / Parallel agentic mode. Default is the backend's fast path."
+            },
+            "topic": {
+                "type": "string",
+                "enum": ["general", "news", "finance"],
+                "description": "Topic vertical (Tavily): use 'news' for current events."
+            },
+            "time_range": {
+                "type": "string",
+                "enum": ["day", "week", "month", "year"],
+                "description": "Restrict results to this recency window where the backend supports it."
+            },
+            "include_domains": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Only return results from these domains (backend-supported)."
+            },
+            "exclude_domains": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Exclude results from these domains (backend-supported)."
             }
         },
         "required": ["query"]
@@ -1567,6 +1799,10 @@ WEB_EXTRACT_SCHEMA = {
                 "type": "integer",
                 "description": "Optional per-page character budget sent back (default 15000). Pages larger than this are head+tail truncated with the full text stored to disk. Raise it when you need more of a long page inline.",
                 "minimum": 2000
+            },
+            "backend": {
+                "type": "string",
+                "description": "Per-call extract backend override (e.g. parallel, tavily, exa, firecrawl). Applies to this call only — never changes configuration. Use as fallback when the default extractor returns thin or blocked content. Unknown or search-only names return an error naming the backend."
             }
         },
         "required": ["urls"]
@@ -1577,7 +1813,16 @@ registry.register(
     name="web_search",
     toolset="web",
     schema=WEB_SEARCH_SCHEMA,
-    handler=lambda args, **kw: web_search_tool(args.get("query", ""), limit=args.get("limit", 5)),
+    handler=lambda args, **kw: web_search_tool(
+        args.get("query", ""),
+        limit=args.get("limit", 5),
+        backend=args.get("backend"),
+        mode=args.get("mode"),
+        topic=args.get("topic"),
+        time_range=args.get("time_range"),
+        include_domains=args.get("include_domains"),
+        exclude_domains=args.get("exclude_domains"),
+    ),
     check_fn=check_web_api_key,
     requires_env=_web_requires_env(),
     emoji="🔍",
@@ -1591,6 +1836,7 @@ registry.register(
         args.get("urls", [])[:5] if isinstance(args.get("urls"), list) else [],
         "markdown",
         char_limit=args.get("char_limit"),
+        backend=args.get("backend"),
     ),
     check_fn=check_web_api_key,
     requires_env=_web_requires_env(),

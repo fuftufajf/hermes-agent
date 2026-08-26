@@ -449,7 +449,9 @@ class TestKeylessFailover:
         assert out["success"] is True
         assert out["data"]["served_by"] == "parallel"
 
-    def test_search_no_failover_on_non_throttle_error(self, monkeypatch):
+    def test_search_fails_over_on_non_throttle_error(self, monkeypatch):
+        # A vendor-specific defect (endpoint change, malformed response)
+        # must not kill the whole walk — the next ring vendor serves.
         self._pin(monkeypatch, "exa")
         monkeypatch.setitem(
             keyless_mcp._KEYLESS_SEARCHERS, "exa",
@@ -461,8 +463,9 @@ class TestKeylessFailover:
             lambda q, l: called.append(1) or self._ok("parallel"),
         )
         out = keyless_mcp.search_with_failover("exa", "q")
-        assert out["success"] is False
-        assert not called  # peer never tried
+        assert out["success"] is True
+        assert called  # peer picked up the broken vendor's traffic
+        assert out["data"]["served_by"] == "parallel"
 
     def test_search_all_throttled_reports_ring(self, monkeypatch):
         self._pin(monkeypatch, "exa")
@@ -473,7 +476,7 @@ class TestKeylessFailover:
             )
         out = keyless_mcp.search_with_failover("exa", "q")
         assert out["success"] is False
-        assert "all keyless vendors throttled" in out["error"]
+        assert "all keyless vendors failed" in out["error"]
 
     def test_search_walks_ring_past_multiple_throttles(self, monkeypatch):
         # exa -> parallel -> tavily all throttled; firecrawl serves.

@@ -177,8 +177,32 @@ class TavilyWebSearchProvider(WebSearchProvider):
     def supports_extract(self) -> bool:
         return True
 
-    def search(self, query: str, limit: int = 5) -> Dict[str, Any]:
-        """Execute a Tavily search."""
+    def supported_search_options(self) -> frozenset:
+        return frozenset(
+            {"mode", "topic", "time_range", "include_domains", "exclude_domains"}
+        )
+
+    def search(
+        self,
+        query: str,
+        limit: int = 5,
+        mode: str = None,
+        topic: str = None,
+        time_range: str = None,
+        include_domains: List[str] = None,
+        exclude_domains: List[str] = None,
+    ) -> Dict[str, Any]:
+        """Execute a Tavily search.
+
+        Option mapping (native Tavily /search parameters):
+        ``mode="deep"`` → ``search_depth="advanced"``; ``topic`` →
+        general|news|finance vertical; ``time_range`` → day|week|month|year;
+        ``include_domains``/``exclude_domains`` → domain filters. Invalid
+        values are dropped with a warning in the returned ``warnings`` list
+        (merged into tool-response meta), never guessed. Tavily's generated
+        answer and raw content stay off — Hermes reads sources itself and
+        full content goes through the extract backend.
+        """
         try:
             from tools.interrupt import is_interrupted
 
@@ -189,25 +213,75 @@ class TavilyWebSearchProvider(WebSearchProvider):
 
             from plugins.web.keyless_mcp import search_with_failover, use_keyless
 
+            option_values = {
+                "mode": mode,
+                "topic": topic,
+                "time_range": time_range,
+                "include_domains": include_domains,
+                "exclude_domains": exclude_domains,
+            }
             if use_keyless("tavily", get_provider_env("TAVILY_API_KEY")):
                 # Keyless free tier — ring dispatch with next-in-line
-                # failover on rate limits.
+                # failover; the ring endpoints take no search options.
                 logger.info(
                     "Tavily keyless search: '%s' (limit=%d)", query, limit
                 )
-                return search_with_failover("tavily", query, limit)
+                result = search_with_failover("tavily", query, limit)
+                dropped = sorted(k for k, v in option_values.items() if v)
+                if dropped:
+                    result.setdefault("warnings", []).append(
+                        "tavily keyless tier ignores search options: "
+                        + ", ".join(dropped)
+                    )
+                return result
 
-            logger.info("Tavily search: '%s' (limit=%d)", query, limit)
-            raw = _tavily_request(
-                "search",
-                {
-                    "query": query,
-                    "max_results": min(limit, 20),
-                    "include_raw_content": False,
-                    "include_images": False,
-                },
+            warnings: List[str] = []
+            payload: Dict[str, Any] = {
+                "query": query,
+                "max_results": min(limit, 20),
+                "include_raw_content": False,
+                "include_images": False,
+            }
+            if mode:
+                if mode == "deep":
+                    payload["search_depth"] = "advanced"
+                elif mode != "fast":
+                    warnings.append(
+                        f"tavily: unknown mode '{mode}' ignored (use fast|deep)"
+                    )
+            if topic:
+                if topic in ("general", "news", "finance"):
+                    payload["topic"] = topic
+                else:
+                    warnings.append(
+                        f"tavily: unknown topic '{topic}' ignored "
+                        "(use general|news|finance)"
+                    )
+            if time_range:
+                if time_range in ("day", "week", "month", "year"):
+                    payload["time_range"] = time_range
+                else:
+                    warnings.append(
+                        f"tavily: unknown time_range '{time_range}' ignored "
+                        "(use day|week|month|year)"
+                    )
+            if include_domains:
+                payload["include_domains"] = [str(d) for d in include_domains][:300]
+            if exclude_domains:
+                payload["exclude_domains"] = [str(d) for d in exclude_domains][:150]
+
+            logger.info(
+                "Tavily search: '%s' (limit=%d, %s)",
+                query, limit,
+                ", ".join(f"{k}={payload[k]}" for k in
+                          ("search_depth", "topic", "time_range")
+                          if k in payload) or "basic",
             )
-            return _normalize_tavily_search_results(raw)
+            raw = _tavily_request("search", payload)
+            normalized = _normalize_tavily_search_results(raw)
+            if warnings:
+                normalized["warnings"] = warnings
+            return normalized
         except ValueError as exc:
             return {"success": False, "error": str(exc)}
         except Exception as exc:  # noqa: BLE001 — including httpx errors

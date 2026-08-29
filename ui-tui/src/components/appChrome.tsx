@@ -560,11 +560,7 @@ export function StatusRule({
   const contextBarWidth = bar ? SEP + stringWidth(`[${bar}] ${pct}%`) : 0
   const rightLabel = sessionTitle ? ` ${sessionTitle} ` : cwdLabel
 
-  const { leftWidth, rightWidth, separatorWidth } = statusRuleWidths(
-    cols,
-    rightLabel,
-    essentialWidth + contextBarWidth
-  )
+  const { leftWidth, rightWidth, separatorWidth } = statusRuleWidths(cols, rightLabel, essentialWidth + contextBarWidth)
 
   // Whole-segment progressive disclosure for the tail: a segment renders only
   // if it fits in the space left after the pinned essentials, evaluated in

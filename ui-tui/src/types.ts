@@ -208,12 +208,16 @@ export interface Usage {
   calls: number
   compressions?: number
   context_max?: number
-  context_percent?: number
-  context_used?: number
+  context_percent?: null | number
+  context_used?: null | number
   cost_status?: string
   cost_usd?: number
   dev_credits_spent_micros?: number
   input: number
+  /** The model the running agent actually answered with (independent of the
+   *  picker/selector). Sent live on every `session.usage` tick; empty before
+   *  the first turn builds the agent. */
+  model?: string
   output: number
   reasoning?: number
   total: number

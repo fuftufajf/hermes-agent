@@ -179,7 +179,7 @@ function FaceTicker({ color, startedAt, style }: { color: string; startedAt?: nu
   )
 }
 
-function ctxBarColor(pct: number | undefined, t: Theme) {
+function ctxBarColor(pct: null | number | undefined, t: Theme) {
   if (pct == null) {
     return t.color.muted
   }
@@ -286,7 +286,7 @@ export function statusRuleWidths(cols: number, cwdLabel: string, minLeftContent 
 // Progressive disclosure for the status rule's lower-priority tail segments.
 // As the terminal narrows we shed the least important pieces first (cost →
 // bg → voice → compressions → duration → context bar), and below the bar
-// breakpoint the context read-out collapses to a bare token count. Status and
+// breakpoint the context read-out collapses to a percentage. Status and
 // model are never gated here — they're guaranteed room by `statusRuleWidths`.
 export interface StatusBarSegments {
   bar: boolean
@@ -488,21 +488,36 @@ export function StatusRule({
   t
 }: StatusRuleProps) {
   const pct = usage.context_percent
+  const contextUsed = usage.context_used
   const barColor = ctxBarColor(pct, t)
   const segs = statusBarSegments(cols)
 
-  // On narrow terminals the context read-out collapses to a bare token count
-  // (`12k tok`) and the visual fill bar is dropped entirely.
+  // On narrow terminals retain model-relative pressure (`25% ctx`) instead of
+  // a bare lifetime-looking token count. Before the first provider measurement,
+  // show the detected model window without inventing a 0% reading.
+  const hasContextMeasurement = contextUsed != null && pct != null
+
   const ctxLabel = usage.context_max
-    ? segs.compactCtx
-      ? `${fmtK(usage.context_used ?? 0)} tok`
-      : `${fmtK(usage.context_used ?? 0)}/${fmtK(usage.context_max)}`
+    ? hasContextMeasurement
+      ? segs.compactCtx
+        ? `${pct}% ctx`
+        : `${fmtK(contextUsed)}/${fmtK(usage.context_max)}`
+      : segs.compactCtx
+        ? 'ctx —'
+        : `—/${fmtK(usage.context_max)}`
     : usage.total > 0
       ? `${fmtK(usage.total)} tok`
       : ''
 
-  const bar = !segs.compactCtx && usage.context_max ? ctxBar(pct) : ''
-  const modelText = modelLabel(model, modelReasoningEffort, modelFast)
+  const bar = !segs.compactCtx && usage.context_max && hasContextMeasurement ? ctxBar(pct) : ''
+
+  // The model is confirmed from the live usage tick (`usage.model`, i.e. the
+  // agent's actual `agent.model`), not the picker/selector surface — that
+  // read-out has historically gone stale or lied during switches. Prefer the
+  // independent live value and fall back to the session-info prop only before
+  // the first usage tick has carried a model.
+  const confirmedModel = usage.model || model
+  const modelText = modelLabel(confirmedModel, modelReasoningEffort, modelFast)
 
   // Battery read-out — the first (pinned) status-bar element when enabled.
   const showBattery = !!battery && battery.available && battery.percent != null
@@ -541,15 +556,21 @@ export function StatusRule({
     stringWidth(modelText) +
     (ctxLabel ? stringWidth(' │ ') + stringWidth(ctxLabel) : 0)
 
+  const SEP = stringWidth(' │ ')
+  const contextBarWidth = bar ? SEP + stringWidth(`[${bar}] ${pct}%`) : 0
   const rightLabel = sessionTitle ? ` ${sessionTitle} ` : cwdLabel
-  const { leftWidth, rightWidth, separatorWidth } = statusRuleWidths(cols, rightLabel, essentialWidth)
+
+  const { leftWidth, rightWidth, separatorWidth } = statusRuleWidths(
+    cols,
+    rightLabel,
+    essentialWidth + contextBarWidth
+  )
 
   // Whole-segment progressive disclosure for the tail: a segment renders only
   // if it fits in the space left after the pinned essentials, evaluated in
   // descending priority order — bar, duration, compressions, voice, session
   // count, bg, cost. Lower-priority segments drop first and nothing truncates
   // mid-segment, so status/model/context are never crushed.
-  const SEP = stringWidth(' │ ')
   let tailBudget = Math.max(0, leftWidth - essentialWidth)
 
   const fits = (w: number) => {
@@ -574,7 +595,7 @@ export function StatusRule({
       ? `Δ ${(usage.dev_credits_spent_micros / 10000).toFixed(1)}¢`
       : ''
 
-  const showBar = !!bar && fits(SEP + stringWidth(`[${bar}] ${pct != null ? `${pct}%` : ''}`))
+  const showBar = !!bar && fits(contextBarWidth)
   const showDuration = segs.duration && !!sessionStartedAt && fits(SEP + MAX_DURATION_WIDTH)
 
   // Idle clock — time since the last final agent response. Hidden while busy

@@ -19139,8 +19139,8 @@ def test_get_usage_does_not_substitute_cumulative_total_for_context_used():
     """An external context engine that does not report last_prompt_tokens must
     not have the cumulative lifetime session_total_tokens shown as its current
     context occupancy — that substitution produced impossible 1.9m/120k (100%)
-    status-bar readings (#50421). With no real current occupancy known,
-    context_used/percent stay unset rather than wrong."""
+    status-bar readings (#50421). With no real current occupancy known, the
+    model limit remains available while the measurement is explicitly null."""
     agent = types.SimpleNamespace(
         model="test-model",
         session_total_tokens=1_900_000,
@@ -19152,8 +19152,9 @@ def test_get_usage_does_not_substitute_cumulative_total_for_context_used():
     )
     usage = server._get_usage(agent)
     assert usage.get("context_used") != 1_900_000
-    assert "context_used" not in usage
-    assert "context_percent" not in usage
+    assert usage["context_max"] == 120_000
+    assert usage["context_used"] is None
+    assert usage["context_percent"] is None
 
 
 def test_get_usage_reports_real_current_occupancy():
@@ -19178,7 +19179,8 @@ def test_get_usage_clamps_post_compression_sentinel():
     """Right after a compression, last_prompt_tokens is the -1 sentinel
     (conversation_compression sets it until the next real usage report). It is
     truthy, so `or 0` doesn't neutralize it — the guard must clamp <0 to 0 so
-    the transitional turn emits no gauge instead of leaking context_used=-1."""
+    the transitional turn reports an unknown measurement instead of leaking
+    context_used=-1, while retaining the detected model window."""
     agent = types.SimpleNamespace(
         model="test-model",
         session_total_tokens=4_000_000,
@@ -19189,8 +19191,9 @@ def test_get_usage_clamps_post_compression_sentinel():
         ),
     )
     usage = server._get_usage(agent)
-    assert "context_used" not in usage
-    assert "context_percent" not in usage
+    assert usage["context_max"] == 1_048_576
+    assert usage["context_used"] is None
+    assert usage["context_percent"] is None
 
 
 # ---------------------------------------------------------------------------

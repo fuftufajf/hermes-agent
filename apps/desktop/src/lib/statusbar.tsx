@@ -34,7 +34,7 @@ export function compactPath(path: string, max = 44): string {
   return tail.length + 2 >= max ? `…${tail.slice(-(max - 1))}` : `…/${tail}`
 }
 
-export function contextBar(percent: number | undefined, width = 10): string {
+export function contextBar(percent: null | number | undefined, width = 10): string {
   const bounded = Math.max(0, Math.min(100, percent ?? 0))
   const filled = Math.round((bounded / 100) * width)
 
@@ -43,18 +43,20 @@ export function contextBar(percent: number | undefined, width = 10): string {
 
 export function usageContextLabel(usage: UsageStats): string {
   if (usage.context_max) {
-    return `${compactNumber(usage.context_used ?? 0)}/${compactNumber(usage.context_max)}`
+    const used = usage.context_used == null ? '—' : compactNumber(usage.context_used)
+
+    return `${used}/${compactNumber(usage.context_max)}`
   }
 
   return usage.total > 0 ? `${compactNumber(usage.total)} tok` : ''
 }
 
 export function contextBarLabel(usage: UsageStats): string {
-  if (!usage.context_max) {
+  if (!usage.context_max || usage.context_percent == null) {
     return ''
   }
 
-  const pct = Math.max(0, Math.min(100, Math.round(usage.context_percent ?? 0)))
+  const pct = Math.max(0, Math.min(100, Math.round(usage.context_percent)))
 
   return `[${contextBar(usage.context_percent)}] ${pct}%`
 }

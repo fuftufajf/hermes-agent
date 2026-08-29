@@ -7135,13 +7135,11 @@ def _get_usage(agent) -> dict:
         # substitution showed lifetime totals as the live context fill, yielding
         # impossible readings such as 1.9m/120k clamped to 100% (#50421).
         #
-        # Per the issue, populate context_used/percent only from a *real*
-        # current-occupancy value and "leave it unknown otherwise" — so a falsy
-        # last_prompt_tokens (0 or missing, i.e. an engine that doesn't track
-        # per-window occupancy) intentionally emits no gauge rather than a
-        # fabricated 0% or the old cumulative reading. The built-in compressor
-        # always reports a real last_prompt_tokens once a turn runs, so it is
-        # unaffected.
+        # Populate context_used/percent only from a *real* current-occupancy
+        # value. The model window itself is independently known at startup and
+        # after a model switch, so always send context_max and use explicit nulls
+        # for the not-yet-measured fields. That lets clients show "—/900k" and
+        # clear a previous model's reading without fabricating 0%.
         # Clamp the -1 "compression just ran, awaiting real usage" sentinel
         # (conversation_compression.py) to 0 so the transitional turn reads as
         # unknown (no gauge) instead of leaking context_used=-1. Matches the
@@ -7150,10 +7148,14 @@ def _get_usage(agent) -> dict:
         if last_prompt < 0:
             last_prompt = 0
         ctx_max = getattr(comp, "context_length", 0) or 0
-        if ctx_max and last_prompt:
-            usage["context_used"] = last_prompt
+        if ctx_max:
             usage["context_max"] = ctx_max
-            usage["context_percent"] = max(0, min(100, round(last_prompt / ctx_max * 100)))
+            usage["context_used"] = last_prompt or None
+            usage["context_percent"] = (
+                max(0, min(100, round(last_prompt / ctx_max * 100)))
+                if last_prompt
+                else None
+            )
         usage["compressions"] = getattr(comp, "compression_count", 0) or 0
     # Live count of background/async subagents still running (delegate_task
     # batches + background single delegations). Mirrors the classic CLI status

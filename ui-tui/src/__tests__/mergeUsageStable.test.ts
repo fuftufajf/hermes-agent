@@ -32,6 +32,20 @@ describe('mergeUsageStable (#41480 status-bar flicker)', () => {
     expect(merged.calls).toBe(3)
   })
 
+  it('clears the previous model measurement while keeping the newly detected window', () => {
+    const switchedModelUsage: Partial<Usage> = {
+      context_max: 900000,
+      context_percent: null,
+      context_used: null
+    }
+
+    const merged = mergeUsageStable(baseUsage, switchedModelUsage)
+
+    expect(merged.context_max).toBe(900000)
+    expect(merged.context_percent).toBeNull()
+    expect(merged.context_used).toBeNull()
+  })
+
   it('detects an active_subagents-only update (field the original PR missed)', () => {
     // usageChanged iterates the key union generically, so optional fields the
     // status rule consumes (active_subagents drives the ⛓ segment and the

@@ -712,8 +712,8 @@ export interface SessionRuntimeInfo {
 export interface UsageStats {
   calls: number
   context_max?: number
-  context_percent?: number
-  context_used?: number
+  context_percent?: null | number
+  context_used?: null | number
   cost_usd?: number
   input: number
   output: number

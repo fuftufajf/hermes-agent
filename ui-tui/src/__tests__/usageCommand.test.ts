@@ -121,4 +121,20 @@ describe('/usage slash command', () => {
     expect(body).toContain('free models only')
     expect(body).toContain('/subscription')
   })
+
+  it('shows a detected model window without inventing usage before the first measurement', async () => {
+    const { panel, run } = buildCtx({
+      'session.usage': baseUsage({
+        calls: 1,
+        context_max: 900_000,
+        context_percent: null,
+        context_used: null
+      })
+    })
+
+    await run('')
+
+    const sections = panel.mock.calls.find(c => c[0] === 'Usage')?.[1] as { text?: string }[]
+    expect(sections.map(section => section.text ?? '').join('\n')).toContain('Context: — / 900,000 (—)')
+  })
 })

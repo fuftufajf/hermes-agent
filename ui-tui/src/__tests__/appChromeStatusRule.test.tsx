@@ -104,6 +104,71 @@ const baseProps = {
   voiceLabel: ''
 }
 
+describe('StatusRule context usage', () => {
+  it('shows the detected model window without pretending an initial 0% measurement', () => {
+    const element = StatusRule({
+      ...baseProps,
+      usage: {
+        calls: 0,
+        context_max: 900_000,
+        context_percent: null,
+        context_used: null,
+        input: 0,
+        output: 0,
+        total: 0
+      }
+    })
+
+    const rendered = textContent(element)
+
+    expect(rendered).toContain('—/900k')
+    expect(rendered).not.toContain('0/900k')
+    expect(rendered).not.toContain('░')
+  })
+
+  it('keeps model-relative context pressure visible on a compact terminal', () => {
+    const element = StatusRule({
+      ...baseProps,
+      cols: 60,
+      usage: {
+        calls: 1,
+        context_max: 200_000,
+        context_percent: 25,
+        context_used: 50_000,
+        input: 50_000,
+        output: 0,
+        total: 50_000
+      }
+    })
+
+    const rendered = textContent(element)
+
+    expect(rendered).toContain('25% ctx')
+    expect(rendered).not.toContain('50k tok')
+  })
+
+  it('keeps the measured context bar ahead of a long session title', () => {
+    const element = StatusRule({
+      ...baseProps,
+      cols: 80,
+      sessionTitle: 'Zbadaj pasek kontekstu czatu',
+      usage: {
+        calls: 2,
+        context_max: 900_000,
+        context_percent: 25,
+        context_used: 225_000,
+        input: 225_000,
+        output: 0,
+        total: 225_000
+      }
+    })
+
+    const rendered = textContent(element)
+
+    expect(rendered).toContain('[███░░░░░░░] 25%')
+  })
+})
+
 describe('StatusRule session title', () => {
   it('pins the named session at the far-right edge instead of the cwd label', () => {
     const element = StatusRule({
@@ -420,6 +485,31 @@ describe('StatusRule battery indicator', () => {
     })
 
     expect(textContent(element)).not.toContain('🔋')
+  })
+})
+
+describe('StatusRule model confirmation', () => {
+  it('prefers the live usage.model over the picker-derived model prop', () => {
+    const element = StatusRule({
+      ...baseProps,
+      model: 'opus-4.8', // what the selector claims
+      usage: { ...baseProps.usage, model: 'deepseek/deepseek-v4-pro' } // what actually answered
+    })
+
+    const rendered = textContent(element)
+
+    expect(rendered).toContain('deepseek v4 pro')
+    expect(rendered).not.toContain('opus 4.8')
+  })
+
+  it('falls back to the session-info model prop before the first usage tick', () => {
+    const element = StatusRule({
+      ...baseProps,
+      model: 'opus-4.8',
+      usage: { ...baseProps.usage, model: '' }
+    })
+
+    expect(textContent(element)).toContain('opus 4.8')
   })
 })
 

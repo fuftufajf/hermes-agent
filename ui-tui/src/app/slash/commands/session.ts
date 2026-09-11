@@ -731,7 +731,7 @@ export const sessionCommands: SlashCommand[] = [
           return
         }
 
-        const f = (v: number | undefined) => (v ?? 0).toLocaleString()
+        const f = (v: null | number | undefined) => (v ?? 0).toLocaleString()
 
         const rows: [string, string][] = [
           ['Model', r.model ?? ''],
@@ -745,8 +745,10 @@ export const sessionCommands: SlashCommand[] = [
 
         if (r.context_max) {
           const mark = r.context_estimated ? '~' : ''
+          const contextUsed = r.context_used == null ? '—' : `${mark}${f(r.context_used)}`
+          const contextPercent = r.context_percent == null ? '—' : `${mark}${r.context_percent}%`
           sections.push({
-            text: `Context: ${mark}${f(r.context_used)} / ${f(r.context_max)} (${mark}${r.context_percent}%)`
+            text: `Context: ${contextUsed} / ${f(r.context_max)} (${contextPercent})`
           })
         }
 

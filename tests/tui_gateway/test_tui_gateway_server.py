@@ -20209,9 +20209,9 @@ def test_get_usage_does_not_substitute_cumulative_total_for_context_used():
         ),
     )
     usage = server._get_usage(agent)
-    assert usage.get("context_used") != 1_900_000
-    assert "context_used" not in usage
-    assert "context_percent" not in usage
+    assert usage["context_max"] == 120_000
+    assert usage["context_used"] is None
+    assert usage["context_percent"] is None
 
 
 def test_get_usage_reports_real_current_occupancy():
@@ -20247,8 +20247,9 @@ def test_get_usage_clamps_post_compression_sentinel():
         ),
     )
     usage = server._get_usage(agent)
-    assert "context_used" not in usage
-    assert "context_percent" not in usage
+    assert usage["context_max"] == 1_048_576
+    assert usage["context_used"] is None
+    assert usage["context_percent"] is None
 
 
 # ---------------------------------------------------------------------------

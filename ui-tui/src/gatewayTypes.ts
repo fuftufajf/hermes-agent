@@ -247,10 +247,10 @@ export interface SessionUsageResponse {
   calls?: number
   compressions?: number
   context_max?: number
-  context_percent?: number
+  context_percent?: null | number
   context_estimated?: boolean
-  context_source?: string
-  context_used?: number
+  context_source?: null | string
+  context_used?: null | number
   cost_status?: 'estimated' | 'exact'
   cost_usd?: number
   credits_lines?: string[]

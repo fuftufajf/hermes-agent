@@ -106,8 +106,12 @@ def context_usage_fields(compressor: Any) -> Dict[str, Any]:
     """Current occupancy only; lifetime throughput is never a context fallback."""
     used = max(0, getattr(compressor, "last_prompt_tokens", 0) or 0)
     maximum = getattr(compressor, "context_length", 0) or 0
-    if not used or not maximum:
+    if not maximum:
         return {}
+    if not used:
+        return {"context_used": None, "context_max": maximum,
+                "context_percent": None, "context_source": None,
+                "context_estimated": False}
     source = context_display_source(compressor)
     return {"context_used": used, "context_max": maximum,
             "context_percent": max(0, min(100, round(used / maximum * 100))),

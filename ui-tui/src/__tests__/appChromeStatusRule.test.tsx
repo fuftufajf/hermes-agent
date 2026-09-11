@@ -104,6 +104,68 @@ const baseProps = {
   voiceLabel: ''
 }
 
+describe('StatusRule context usage', () => {
+  it('shows the detected model window without pretending an initial 0% measurement', () => {
+    const rendered = textContent(
+      StatusRule({
+        ...baseProps,
+        usage: {
+          calls: 0,
+          context_max: 900_000,
+          context_percent: null,
+          context_used: null,
+          input: 0,
+          output: 0,
+          total: 0
+        }
+      })
+    )
+
+    expect(rendered).toContain('—/900k')
+    expect(rendered).not.toContain('0/900k')
+    expect(rendered).not.toContain('░')
+  })
+
+  it('keeps model-relative context pressure visible on a compact terminal', () => {
+    const rendered = textContent(
+      StatusRule({
+        ...baseProps,
+        cols: 60,
+        usage: { ...baseProps.usage, context_percent: 25, context_used: 50_000 }
+      })
+    )
+
+    expect(rendered).toContain('25% ctx')
+    expect(rendered).not.toContain('50k tok')
+  })
+
+  it('keeps the measured context bar ahead of a long session title', () => {
+    const rendered = textContent(
+      StatusRule({
+        ...baseProps,
+        cols: 80,
+        sessionTitle: 'Zbadaj pasek kontekstu czatu',
+        usage: { ...baseProps.usage, context_max: 900_000, context_percent: 25, context_used: 225_000 }
+      })
+    )
+
+    expect(rendered).toContain('[███░░░░░░░] 25%')
+  })
+
+  it('prefers the live usage model over the picker-derived model', () => {
+    const rendered = textContent(
+      StatusRule({
+        ...baseProps,
+        model: 'opus-4.8',
+        usage: { ...baseProps.usage, model: 'deepseek/deepseek-v4-pro' }
+      })
+    )
+
+    expect(rendered).toContain('deepseek v4 pro')
+    expect(rendered).not.toContain('opus 4.8')
+  })
+})
+
 describe('StatusRule session title', () => {
   it('marks only estimated context occupancy at every visible width', () => {
     for (const cols of [80, 120, 200]) {

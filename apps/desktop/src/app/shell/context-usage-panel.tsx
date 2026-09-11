@@ -20,6 +20,7 @@ export function ContextUsagePanel({ breakdown, loading, usage }: ContextUsagePan
   const { t } = useI18n()
   const copy = t.shell.statusbar.contextUsagePanel
   const contextMax = usage.context_max ?? 0
+  const hasMeasurement = usage.context_used != null && usage.context_percent != null
   const contextUsed = usage.context_used ?? 0
   const contextPercent = Math.max(0, Math.min(100, Math.round(usage.context_percent ?? 0)))
 
@@ -41,15 +42,14 @@ export function ContextUsagePanel({ breakdown, loading, usage }: ContextUsagePan
 
         <span className="text-[0.6875rem] text-muted-foreground">
           {copy.tokenSummary(
-            `${usage.context_estimated ? '~' : ''}${compactNumber(contextUsed)}`,
+            hasMeasurement ? `${usage.context_estimated ? '~' : ''}${compactNumber(contextUsed)}` : '—',
             compactNumber(contextMax)
           )}
         </span>
       </div>
 
       <p className="text-[0.6875rem] text-foreground">
-        {usage.context_estimated ? '~' : ''}
-        {copy.percentFull(contextPercent)}
+        {hasMeasurement ? `${usage.context_estimated ? '~' : ''}${copy.percentFull(contextPercent)}` : '—'}
       </p>
 
       <ContextUsageBar categories={categories} segmentTotal={segmentTotal} />

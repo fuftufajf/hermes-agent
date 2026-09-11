@@ -101,6 +101,19 @@ describe('useContextBreakdown', () => {
 })
 
 describe('ContextUsagePanel', () => {
+  it('shows unknown rather than zero before the first measurement', () => {
+    const { container } = render(
+      <ContextUsagePanel
+        breakdown={null}
+        loading={false}
+        usage={{ ...usage, context_percent: null, context_used: null }}
+      />
+    )
+
+    expect(container.textContent).toContain('— / 272k')
+    expect(container.textContent).not.toContain('0% Full')
+  })
+
   it('marks estimates but preserves the provider-usage header', () => {
     for (const estimated of [true, false]) {
       const { container, unmount } = render(

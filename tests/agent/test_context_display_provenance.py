@@ -37,7 +37,10 @@ def test_preflight_seed_does_not_label_actual_usage_estimated():
     assert _get_usage(agent).get("context_estimated") is False
     assert _get_usage(agent)["context_used"] == 1234
     comp.last_prompt_tokens = -1
-    assert "context_used" not in _get_usage(agent)
+    cleared = _get_usage(agent)
+    assert cleared["context_max"] == 100_000
+    assert cleared["context_used"] is None
+    assert cleared["context_percent"] is None
     from agent.context_breakdown import context_display_source
     # A cleared live gauge must not re-label a persisted provider fallback.
     assert context_display_source(comp) == "provider_usage"

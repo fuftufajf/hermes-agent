@@ -51,13 +51,16 @@ class ParallelWebSearchProvider(BaseWebSearchProvider):
     EXTRACT = True
     KEYLESS = True
 
-    def search(self, query: str, limit: int = 5) -> Dict[str, Any]:
+    def supported_search_options(self):
+        return frozenset({"mode"})
+
+    def search(self, query: str, limit: int = 5, mode: str = None, **kwargs: Any) -> Dict[str, Any]:
         def _body() -> Dict[str, Any]:
             if use_keyless("parallel", provider_env("PARALLEL_API_KEY")):
                 return keyless_search("Parallel", "parallel", query, limit, logger)
-            mode = _resolve_search_mode()
-            logger.info("Parallel search: '%s' (mode=%s, limit=%d)", query, mode, limit)
-            response = _get_sync_client().beta.search(search_queries=[query], objective=query, mode=mode, max_results=min(limit, SEARCH_LIMIT_CAP))
+            native_mode = {"fast": "fast", "deep": "agentic"}.get(mode, _resolve_search_mode())
+            logger.info("Parallel search: '%s' (mode=%s, limit=%d)", query, native_mode, limit)
+            response = _get_sync_client().beta.search(search_queries=[query], objective=query, mode=native_mode, max_results=min(limit, SEARCH_LIMIT_CAP))
             return search_ok([
                 web_hit(r.url or "", r.title or "", " ".join(r.excerpts or []), i + 1)
                 for i, r in enumerate(response.results or [])

@@ -12,6 +12,7 @@ import logging
 import re
 import threading
 import uuid
+from contextvars import ContextVar
 from typing import Any, Callable, Dict, List, Optional
 
 from plugins.web._common import document as _page, page_error as _page_error, search_fail, search_ok, web_hit as _row
@@ -326,11 +327,13 @@ _KEYLESS_EXTRACTORS: Dict[str, Callable[[List[str]], List[Dict[str, Any]]]] = {v
 # spreads across vendors; advances once per unpinned keyless request.
 _ring_lock = threading.Lock()
 _ring_cursor = int(_SESSION_ID, 16) % len(_KEYLESS_RING)
+_explicit_vendor: "ContextVar[str]" = ContextVar("keyless_explicit_vendor", default="")
 
 
 def _vendor_pinned(name: str) -> bool:
-    """True when config explicitly routes web traffic to *name* (backend keys or a
-    ``free`` tier pin). A pinned vendor starts every keyless request."""
+    """True when this call or config explicitly routes web traffic to *name*."""
+    if name and name == _explicit_vendor.get():
+        return True
     if provider_tier(name) == "free":
         return True
     try:
@@ -358,47 +361,57 @@ def _ring_order(name: str) -> List[str]:
 _ALL_PAID_MSG = "All keyless web providers are pinned to paid tiers."
 
 
-def _walk_ring(name: str, kind: str, call, throttled) -> tuple:
-    """Call each vendor from :func:`_ring_order` until a result is not ``throttled``.
+def _walk_ring(name: str, kind: str, call, failed) -> tuple:
+    """Call each vendor from :func:`_ring_order` until a result has not ``failed``.
     Returns ``(order, vendor, result, exhausted)``; ``order`` is empty (result None)
     when every vendor is pinned paid."""
     order = _ring_order(name)
     vendor, result = None, None
     for i, vendor in enumerate(order):
         result = call(vendor)
-        if not throttled(result):
+        if not failed(result):
             return order, vendor, result, False
         if i + 1 < len(order):
-            logger.info("keyless %s %s throttled; failing over to %s", vendor, kind, order[i + 1])
+            logger.info("keyless %s %s failed; failing over to %s", vendor, kind, order[i + 1])
     return order, vendor, result, True
 
 
 def search_with_failover(name: str, query: str, limit: int = 5) -> Dict[str, Any]:
-    """Rate-limit-shaped errors advance to the next vendor, other errors stop the walk
-    (a malformed query fails everywhere). ``data.served_by`` is set when the serving
-    vendor differs from *name*."""
+    """Any vendor failure advances to the next ring member; successful failover is annotated."""
+    failures: List[str] = []
 
-    def _throttled(result: Dict[str, Any]) -> bool:
-        return not result.get("success") and _is_rate_limitish(result.get("error", ""))
+    def _call(vendor: str) -> Dict[str, Any]:
+        result = _KEYLESS_SEARCHERS[vendor](query, limit)
+        if not result.get("success"):
+            failures.append(str(result.get("error", "")))
+        return result
 
-    order, vendor, result, exhausted = _walk_ring(name, "search", lambda v: _KEYLESS_SEARCHERS[v](query, limit), _throttled)
+    def _failed(result: Dict[str, Any]) -> bool:
+        return not result.get("success")
+
+    order, vendor, result, exhausted = _walk_ring(name, "search", _call, _failed)
     if not order:
         return search_fail(_ALL_PAID_MSG)
     if exhausted:
-        result["error"] = f"{result.get('error', '')} (all keyless vendors throttled: {', '.join(order)})"
+        reason = "throttled" if failures and all(_is_rate_limitish(error) for error in failures) else "failed"
+        result["error"] = f"{result.get('error', '')} (all keyless vendors {reason}: {', '.join(order)})"
     elif result.get("success") and vendor != name:
         result.setdefault("data", {})["served_by"] = vendor
     return result
 
 
 def extract_with_failover(name: str, urls: List[str]) -> List[Dict[str, Any]]:
-    """Fails over only when EVERY url in a batch is rate-limit-shaped (partial failures
-    are page problems, returned as-is)."""
+    """Fail over when every URL failed; partial page failures are returned as-is."""
 
-    def _all_throttled(results: List[Dict[str, Any]]) -> bool:
-        return bool(results) and all(r.get("error", "") and _is_rate_limitish(r.get("error", "")) for r in results)
+    def _all_failed(results: List[Dict[str, Any]]) -> bool:
+        return bool(results) and all(r.get("error", "") for r in results)
 
-    order, _vendor, results, _exhausted = _walk_ring(name, "extract", lambda v: _KEYLESS_EXTRACTORS[v](list(urls)), _all_throttled)
+    order, _vendor, results, _exhausted = _walk_ring(
+        name,
+        "extract",
+        lambda v: _KEYLESS_EXTRACTORS[v](list(urls)),
+        _all_failed,
+    )
     if not order:
         return [_page_error(u, _ALL_PAID_MSG) for u in urls]
     return results

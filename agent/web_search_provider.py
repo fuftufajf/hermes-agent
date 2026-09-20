@@ -65,7 +65,11 @@ class WebSearchProvider(ProviderBase):
         the dispatcher awaits coroutine functions)."""
         return False
 
-    def search(self, query: str, limit: int = 5) -> Dict[str, Any]:
+    def supported_search_options(self):
+        """Optional per-call search options this provider accepts."""
+        return frozenset()
+
+    def search(self, query: str, limit: int = 5, **kwargs: Any) -> Dict[str, Any]:
         """Execute a web search. Callers gate on :meth:`supports_search`."""
         raise NotImplementedError(
             f"{self.name} does not support search (override supports_search)"

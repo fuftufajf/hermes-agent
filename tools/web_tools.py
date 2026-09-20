@@ -12,7 +12,9 @@ Debug: ``WEB_TOOLS_DEBUG=true`` writes ``logs/web_tools_debug_<UUID>.json``.
 import json
 import logging
 import os
-from typing import List, Any, Optional
+import time
+from contextlib import contextmanager
+from typing import List, Dict, Any, Optional
 # Per-vendor client cache slots; plugins read/write these via tools.web_tools (tests reset them to None).
 _firecrawl_client = _firecrawl_client_config = _parallel_client = _async_parallel_client = _exa_client = None
 
@@ -265,8 +267,37 @@ def _finish_debug(call_name: str, debug_call_data: dict, error_msg: Optional[str
     return None if error_msg is None else tool_error(error_msg)
 
 
-def web_search_tool(query: str, limit: int = 5) -> str:
+@contextmanager
+def _explicit_vendor_scope(backend: str):
+    """Pin one keyless-ring dispatch to an explicitly requested vendor."""
+    token = context = None
+    if backend:
+        try:
+            from plugins.web.keyless_mcp import _explicit_vendor as context
+            token = context.set(backend)
+        except Exception as exc:  # noqa: BLE001 — keyless ring is optional
+            logger.debug("explicit vendor scope unavailable: %s", exc)
+    try:
+        yield
+    finally:
+        if context is not None and token is not None:
+            context.reset(token)
+
+
+def web_search_tool(
+    query: str,
+    limit: int = 5,
+    backend: Optional[str] = None,
+    mode: Optional[str] = None,
+    topic: Optional[str] = None,
+    time_range: Optional[str] = None,
+    include_domains: Optional[List[str]] = None,
+    exclude_domains: Optional[List[str]] = None,
+) -> str:
     """Search the web via the configured backend.
+
+    ``backend`` overrides provider selection for this call only and never mutates
+    persisted configuration.
 
     Returns a JSON string ``{"success": bool, "data": {"web": [{"title", "url", "description", "position"},
     ...]}}`` (metadata only — use web_extract_tool for page content) or ``{"success": false, "error": ...}``.
@@ -275,9 +306,31 @@ def web_search_tool(query: str, limit: int = 5) -> str:
         limit = min(max(int(limit), 1), 100)
     except (TypeError, ValueError):
         limit = 5
+    requested_backend = (backend or "").lower().strip()
+    requested_options = {
+        key: value
+        for key, value in (
+            ("mode", mode),
+            ("topic", topic),
+            ("time_range", time_range),
+            ("include_domains", include_domains),
+            ("exclude_domains", exclude_domains),
+        )
+        if value
+    }
+    started = time.monotonic()
+    warnings: List[str] = []
     debug_call_data = {
-        "parameters": {"query": query, "limit": limit}, "error": None, "results_count": 0,
-        "original_response_size": 0, "final_response_size": 0,
+        "parameters": {
+            "query": query,
+            "limit": limit,
+            "backend": requested_backend or None,
+            "options": requested_options,
+        },
+        "error": None,
+        "results_count": 0,
+        "original_response_size": 0,
+        "final_response_size": 0,
     }
 
     try:
@@ -287,22 +340,68 @@ def web_search_tool(query: str, limit: int = 5) -> str:
         # Sync only — every provider's search() is sync.
         _ensure_web_plugins_loaded()
         from agent.web_search_registry import get_active_search_provider, get_provider as _wsp_get_provider
-        backend = _get_search_backend()
-        provider = _wsp_get_provider(backend) if backend else None
-        if provider is None or not provider.supports_search():
-            if provider is None and backend and selection_exists("web"):
-                error_text = debug_call_data["error"] = _strict_selection_error("search", backend)
-                _finish_debug("web_search_tool", debug_call_data)
-                return json.dumps({"success": False, "error": error_text}, indent=2, ensure_ascii=False)
-            # Never-configured install: legacy availability-walked autodetect.
-            provider = get_active_search_provider()
+        response_data = None
+        if requested_backend:
+            provider = _wsp_get_provider(requested_backend)
+            if provider is None:
+                names = ", ".join(sorted(p.name for p in _list_registered_web_providers())) or "none registered"
+                response_data = {
+                    "success": False,
+                    "error": f"Unknown web search backend '{requested_backend}'. Registered backends: {names}.",
+                }
+            elif not provider.supports_search():
+                response_data = {
+                    "success": False,
+                    "error": f"{provider.display_name} does not support search (extract-only backend).",
+                }
+        else:
+            configured_backend = _get_search_backend()
+            provider = _wsp_get_provider(configured_backend) if configured_backend else None
+            if provider is None or not provider.supports_search():
+                if provider is None and configured_backend and selection_exists("web"):
+                    error_text = debug_call_data["error"] = _strict_selection_error("search", configured_backend)
+                    _finish_debug("web_search_tool", debug_call_data)
+                    return json.dumps({"success": False, "error": error_text}, indent=2, ensure_ascii=False)
+                # Never-configured install: legacy availability-walked autodetect.
+                provider = get_active_search_provider()
 
-        if provider is None:
+        if provider is None and response_data is None:
             fallback = "No web search provider configured. Run `hermes tools` to set one up."
             response_data = {"success": False, "error": _no_provider_error("search", fallback)}
-        else:
+        elif provider is not None and response_data is None:
+            supported = frozenset(getattr(provider, "supported_search_options", lambda: ())())
+            passed_options = {}
+            for key, value in requested_options.items():
+                if key in supported:
+                    passed_options[key] = value
+                else:
+                    warnings.append(f"backend '{provider.name}' does not support option '{key}' (ignored)")
             logger.info("Web search via %s: '%s' (limit: %d)", provider.name, query, limit)
-            response_data = _memoized_search(provider, query, limit)
+            response_data = _memoized_search(
+                provider,
+                query,
+                limit,
+                options=passed_options,
+                explicit_backend=requested_backend,
+            )
+
+        response_data = dict(response_data)
+        provider_warnings = response_data.pop("warnings", None)
+        if provider_warnings:
+            warnings.extend(str(item) for item in provider_warnings)
+        data = response_data.get("data", {})
+        meta = {
+            "requested_backend": requested_backend or None,
+            "served_by": data.get("served_by") or (provider.name if response_data.get("success") and provider else None),
+            "mode": requested_options.get("mode"),
+            "result_count": len(data.get("web", [])),
+            "elapsed_s": round(time.monotonic() - started, 2),
+        }
+        if data.get("rescued_from"):
+            meta["rescued_from"] = data["rescued_from"]
+        if warnings:
+            meta["warnings"] = warnings
+        response_data["meta"] = meta
 
         debug_call_data["results_count"] = len(response_data.get("data", {}).get("web", []))
         result_json = json.dumps(response_data, indent=2, ensure_ascii=False)
@@ -313,38 +412,55 @@ def web_search_tool(query: str, limit: int = 5) -> str:
         return _finish_debug("web_search_tool", debug_call_data, f"Error searching web: {str(e)}")
 
 
-def _memoized_search(provider, query: str, limit: int) -> dict:
+def _memoized_search(
+    provider,
+    query: str,
+    limit: int,
+    options: Optional[Dict[str, Any]] = None,
+    explicit_backend: str = "",
+) -> dict:
     """TTL memo + single-flight around the paid vendor call (tools/web_result_cache.py); sits after every
     safety/config check. The provider is asked for the BUCKETED count so near-identical limits share an entry;
     the caller's count is sliced out. Only successful, non-rescued responses are cached — caching a rescue
     would make the one-shot ring fallback sticky for a whole TTL."""
     from tools.web_result_cache import bucket_limit, search_memo, slice_search_response
 
+    options = options or {}
+    memo_provider = provider.name
+    if options:
+        memo_provider += "|" + json.dumps(options, ensure_ascii=False, sort_keys=True)
+
     def _paid_search() -> tuple[dict, bool]:
         fetch_limit = bucket_limit(limit)
-        try:
-            resp = provider.search(query, fetch_limit)
-        except Exception as exc:  # noqa: BLE001 — candidate for rescue
-            if not _rescue_eligible(provider):
-                raise
-            return _rescue_search(provider.name, str(exc), query, fetch_limit), True
+        with _explicit_vendor_scope(explicit_backend):
+            try:
+                resp = provider.search(query, fetch_limit, **options)
+            except Exception as exc:  # noqa: BLE001 — candidate for rescue
+                if not _rescue_eligible(provider):
+                    raise
+                return _rescue_search(provider.name, str(exc), query, fetch_limit), True
         if not resp.get("success") and _rescue_eligible(provider):
             return _rescue_search(provider.name, str(resp.get("error", "")), query, fetch_limit), True
         return resp, False
 
-    response_data = search_memo.lookup(provider.name, query, limit)
+    response_data = search_memo.lookup(memo_provider, query, limit)
     if response_data is None:
-        with search_memo.flight_lock(provider.name, query, limit):
+        with search_memo.flight_lock(memo_provider, query, limit):
             # Re-check inside the lock: a concurrent identical call may have stored.
-            response_data = search_memo.lookup(provider.name, query, limit)
+            response_data = search_memo.lookup(memo_provider, query, limit)
             if response_data is None:
                 response_data, was_rescued = _paid_search()
                 if not was_rescued:
-                    search_memo.store(provider.name, query, limit, response_data)
+                    search_memo.store(memo_provider, query, limit, response_data)
     return slice_search_response(response_data, limit)
 
 
-async def web_extract_tool(urls: List[Any], format: str = None, char_limit: Optional[int] = None) -> str:
+async def web_extract_tool(
+    urls: List[Any],
+    format: str = None,
+    char_limit: Optional[int] = None,
+    backend: Optional[str] = None,
+) -> str:
     """Extract clean page content (no LLM) from URLs via the configured backend.
 
     Pages over ``char_limit`` (default web.extract_char_limit or 15000) are head+tail truncated with a footer
@@ -354,8 +470,16 @@ async def web_extract_tool(urls: List[Any], format: str = None, char_limit: Opti
     normalized_urls, normalized_indices, invalid_urls, blocked = _validate_extract_urls(urls)
     if blocked is not None:
         return blocked
+    requested_backend = (backend or "").lower().strip()
+    started = time.monotonic()
     debug_call_data = {
-        "parameters": {"urls": normalized_urls, "format": format, "char_limit": char_limit}, "error": None,
+        "parameters": {
+            "urls": normalized_urls,
+            "format": format,
+            "char_limit": char_limit,
+            "backend": requested_backend or None,
+        },
+        "error": None,
         "pages_extracted": 0, "pages_truncated": 0, "original_response_size": 0, "final_response_size": 0,
         "truncation_metrics": [], "processing_applied": [],
     }
@@ -374,13 +498,43 @@ async def web_extract_tool(urls: List[Any], format: str = None, char_limit: Opti
                 )
 
         results = []
+        provider = None
         if safe_urls:
-            backend = _get_extract_backend()
             _ensure_web_plugins_loaded()
-            provider, error_json = _resolve_extract_provider(backend)
+            if requested_backend:
+                provider = _registered_web_provider(requested_backend)
+                if provider is None:
+                    names = ", ".join(sorted(p.name for p in _list_registered_web_providers())) or "none registered"
+                    return json.dumps(
+                        {
+                            "success": False,
+                            "error": (
+                                f"Unknown web extract backend '{requested_backend}'. "
+                                f"Registered backends: {names}."
+                            ),
+                            "meta": {"requested_backend": requested_backend},
+                        },
+                        ensure_ascii=False,
+                    )
+                if not provider.supports_extract():
+                    return json.dumps(
+                        {
+                            "success": False,
+                            "error": (
+                                f"{provider.display_name} is a search-only backend "
+                                "and cannot extract URL content."
+                            ),
+                            "meta": {"requested_backend": requested_backend},
+                        },
+                        ensure_ascii=False,
+                    )
+                error_json = None
+            else:
+                provider, error_json = _resolve_extract_provider(_get_extract_backend())
             if error_json is not None:
                 return error_json
-            results = await _extract_safe_urls(provider, safe_urls, format)
+            with _explicit_vendor_scope(requested_backend):
+                results = await _extract_safe_urls(provider, safe_urls, format)
         # Reconstruct input order across invalid, blocked, and provider entries (providers preserve
         # the order of the safe URL list they receive).
         if invalid_urls or ssrf_blocked:
@@ -394,7 +548,20 @@ async def web_extract_tool(urls: List[Any], format: str = None, char_limit: Opti
         _truncate_results(results, _effective_char_limit(char_limit), debug_call_data)
         trimmed = _trim_results(results)
         result_json = (
-            json.dumps({"results": trimmed}, indent=2, ensure_ascii=False) if trimmed
+            json.dumps(
+                {
+                    "results": trimmed,
+                    "meta": {
+                        "requested_backend": requested_backend or None,
+                        "served_by": getattr(provider, "name", None),
+                        "result_count": len(trimmed),
+                        "elapsed_s": round(time.monotonic() - started, 2),
+                    },
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+            if trimmed
             else tool_error("Content was inaccessible or not found")
         )
         # Belt-and-suspenders sweep of the serialized JSON: a provider may tuck a base64 blob in metadata.
@@ -467,6 +634,30 @@ WEB_SEARCH_SCHEMA = {
                 "minimum": 1,
                 "maximum": 100,
                 "default": 5
+            },
+            "backend": {
+                "type": "string",
+                "description": "Per-call backend override. Applies only to this call and never changes configuration."
+            },
+            "mode": {
+                "type": "string",
+                "enum": ["fast", "deep"]
+            },
+            "topic": {
+                "type": "string",
+                "enum": ["general", "news", "finance"]
+            },
+            "time_range": {
+                "type": "string",
+                "enum": ["day", "week", "month", "year"]
+            },
+            "include_domains": {
+                "type": "array",
+                "items": {"type": "string"}
+            },
+            "exclude_domains": {
+                "type": "array",
+                "items": {"type": "string"}
             }
         },
         "required": ["query"]
@@ -489,6 +680,10 @@ WEB_EXTRACT_SCHEMA = {
                 "type": "integer",
                 "description": "Optional per-page character budget sent back (default 15000). Pages larger than this are head+tail truncated with the full text stored to disk. Raise it when you need more of a long page inline.",
                 "minimum": 2000
+            },
+            "backend": {
+                "type": "string",
+                "description": "Per-call extract backend override. Applies only to this call."
             }
         },
         "required": ["urls"]
@@ -497,7 +692,16 @@ WEB_EXTRACT_SCHEMA = {
 
 registry.register(
     name="web_search", toolset="web", schema=WEB_SEARCH_SCHEMA,
-    handler=lambda args, **kw: web_search_tool(args.get("query", ""), limit=args.get("limit", 5)),
+    handler=lambda args, **kw: web_search_tool(
+        args.get("query", ""),
+        limit=args.get("limit", 5),
+        backend=args.get("backend"),
+        mode=args.get("mode"),
+        topic=args.get("topic"),
+        time_range=args.get("time_range"),
+        include_domains=args.get("include_domains"),
+        exclude_domains=args.get("exclude_domains"),
+    ),
     check_fn=check_web_api_key, requires_env=_web_requires_env(), emoji="🔍",
     max_result_size_chars=100_000,
 )
@@ -506,6 +710,7 @@ registry.register(
     handler=lambda args, **kw: web_extract_tool(
         args.get("urls", [])[:5] if isinstance(args.get("urls"), list) else [], "markdown",
         char_limit=args.get("char_limit"),
+        backend=args.get("backend"),
     ),
     check_fn=check_web_api_key, requires_env=_web_requires_env(), is_async=True, emoji="📄",
     max_result_size_chars=100_000,

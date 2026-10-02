@@ -29,3 +29,9 @@ _COMPRESSION_MARKER_RE = re.compile(
     .replace(re.escape("{omitted:,}"), r"\d[\d,]*")
     .replace(re.escape("{total:,}"), r"\d[\d,]*")
 )
+
+# A marker cut short is still not original content. Match the first rendered
+# numeric count while leaving the bare prefix and unrendered templates editable.
+_COMPRESSION_MARKER_ARTIFACT_RE = re.compile(
+    re.escape(_COMPRESSION_MARKER_PREFIX) + r"\s+\d[\d,]*"
+)

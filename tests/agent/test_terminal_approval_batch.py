@@ -3,6 +3,7 @@
 import json
 import queue
 import threading
+import time
 from contextlib import ExitStack
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -228,5 +229,81 @@ def test_cancelled_preparation_drains_requests_without_reusing_once(tmp_path, mo
             worker.join(5)
             if retry_worker is not None:
                 retry_worker.join(5)
+            cleanup_vm(key)
+            clear_session_vars(tokens)
+
+
+def test_failed_command_re_gates_later_prepared_approvals(tmp_path, monkeypatch):
+    """An earlier failure invalidates the informed consent for the later command.
+
+    Upstream regression: c42c90552ecb0f0062e91c8bc0a048c1b4d44ea5.
+    """
+    from tools.terminal_scope import reset_terminal_scope, set_terminal_scope
+    from tools.terminal_tool_lifecycle import cleanup_vm
+
+    monkeypatch.delenv("HERMES_DESKTOP", raising=False)
+    monkeypatch.setenv("HERMES_EXEC_ASK", "1")
+    monkeypatch.setenv("TERMINAL_ENV", "local")
+    monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))
+    monkeypatch.setattr("tools.approval_context._get_approval_mode", lambda: "manual")
+    monkeypatch.setattr("tools.approval._tirith_scan", lambda command: {"action": "allow"})
+    monkeypatch.setattr("agent.title_generator.maybe_auto_title", lambda *a, **kw: None)
+    key = "regate-terminal-batch"
+    effect = tmp_path / "effect-later.txt"
+    commands = {"failing": "rm -rf absent-first; false",
+                "later": f"rm -rf absent-second; printf ran > '{effect}'"}
+    agent = _agent()
+    published = queue.Queue()
+    approval.register_gateway_notify(key, published.put)
+    from tui_gateway import server
+    monkeypatch.setattr(server, "_sessions", {key: {
+        "session_key": key, "source": "desktop", "agent": agent, "cwd": str(tmp_path),
+    }})
+    tokens = server._set_session_context(key)
+    calls = [_call(call_id, commands[call_id]) for call_id in ("failing", "later")]
+    executed, messages, errors = [], [], []
+    agent._flush_messages_to_session_db = lambda *a, **kw: True
+    agent.tool_start_callback = lambda call_id, name, args: executed.append((call_id, args["command"]))
+
+    def run():
+        try:
+            agent._execute_tool_calls(SimpleNamespace(tool_calls=calls), messages, key)
+        except BaseException as exc:
+            errors.append(exc)
+
+    with ExitStack() as scope:
+        scope.callback(reset_terminal_scope, set_terminal_scope({"TERMINAL_ENV": "local", "TERMINAL_CWD": str(tmp_path)}))
+        worker = threading.Thread(target=propagate_context_to_thread(run), daemon=True)
+        worker.start()
+        try:
+            first_request = published.get(timeout=10)
+            later_request = published.get(timeout=5)
+            assert {first_request["command"], later_request["command"]} == set(commands.values())
+            assert executed == []
+            assert approval.resolve_gateway_approval(key, "once", request_id=later_request["request_id"]) == 1
+            assert approval.resolve_gateway_approval(key, "once", request_id=first_request["request_id"]) == 1
+            started = time.monotonic()
+            while not executed and time.monotonic() - started < 10:
+                time.sleep(0.05)
+            assert executed == [("failing", commands["failing"])]
+            regated = published.get(timeout=10)
+            assert regated["command"] == commands["later"]
+            assert regated["request_id"] != later_request["request_id"]
+            assert not effect.exists()
+            assert approval.resolve_gateway_approval(key, "once", request_id=regated["request_id"]) == 1
+            worker.join(timeout=15)
+            assert not worker.is_alive()
+            assert errors == []
+            assert executed == [("failing", commands["failing"]), ("later", commands["later"])]
+            assert [m["tool_call_id"] for m in messages] == [c.id for c in calls]
+            results = {m["tool_call_id"]: json.loads(m["content"]) for m in messages}
+            assert results["failing"]["exit_code"] == 1
+            assert results["later"]["exit_code"] == 0
+            assert effect.exists() and effect.read_text() == "ran"
+            assert approval.list_gateway_approvals(key) == []
+        finally:
+            agent.interrupt("test cleanup")
+            approval.unregister_gateway_notify(key)
+            worker.join(timeout=5)
             cleanup_vm(key)
             clear_session_vars(tokens)

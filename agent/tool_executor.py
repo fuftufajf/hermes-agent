@@ -1801,6 +1801,10 @@ def _publish_sequential_result(agent, messages: list, ref: _ToolCallRef, managed
         return False
     function_result, display_function_result, risk_metadata = committed
 
+    # Re-gate later terminal approvals after a published failure or block.
+    from agent.terminal_approval_batch import mark_batch_outcome
+    mark_batch_outcome(_is_error_result or bool(managed.blocked))
+
     _emit_tool_complete_and_risk(agent, ref, display_function_result, risk_metadata, managed.blocked)
     if _tool_progress_enabled(agent):
         _print_tool_completed(agent, index, tool_duration, function_result)

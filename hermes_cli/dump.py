@@ -163,6 +163,7 @@ _INTERESTING_PATHS = (
 
 def _config_overrides(config: dict) -> dict[str, str]:
     """Find non-default config values worth reporting."""
+    from agent.redact import redact_sensitive_text
     from hermes_cli.config import DEFAULT_CONFIG
     overrides = {}
     for section, key in _INTERESTING_PATHS:
@@ -178,8 +179,21 @@ def _config_overrides(config: dict) -> dict[str, str]:
         overrides["toolsets"] = str(user_toolsets)
     fallbacks = config.get("fallback_providers", [])
     if fallbacks:
-        overrides["fallback_providers"] = str(fallbacks)
-    return overrides
+        overrides["fallback_providers"] = str(_mask_fallback_keys(fallbacks))
+    return {key: redact_sensitive_text(value, force=True, redact_url_credentials=True)
+            for key, value in overrides.items()}
+
+
+def _mask_fallback_keys(value):
+    """Mask credential fields before stringification, including non-string values."""
+    from agent.redact import is_secret_field_name
+
+    if isinstance(value, dict):
+        return {key: "***" if child and is_secret_field_name(key) else _mask_fallback_keys(child)
+                for key, child in value.items()}
+    if isinstance(value, list):
+        return [_mask_fallback_keys(child) for child in value]
+    return value
 
 
 # (env var, dump label) in display order.

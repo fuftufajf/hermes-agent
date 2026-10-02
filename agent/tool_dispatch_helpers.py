@@ -16,7 +16,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from agent.compression_marker import _COMPRESSION_MARKER_RE
+from agent.compression_marker import _COMPRESSION_MARKER_ARTIFACT_RE
 from agent.message_metadata import stamp_message_timestamp
 from agent.tool_result_classification import (
     FILE_MUTATING_TOOL_NAMES as _FILE_MUTATING_TOOLS,
@@ -72,9 +72,8 @@ _REDIRECT_OVERWRITE = re.compile(r'[^>]>[^>]|^>[^>]')
 def _context_pruned_argument_paths(tool_name: str, args: Any) -> list[str]:
     """Paths whose values contain model-visible context-compression artifacts.
 
-    The compressor's current marker carries numeric omitted/total counts. Match
-    that rendered shape rather than the prefix alone so Hermes can still edit
-    source/docs that mention the compression marker constant or its template.
+    Recognize a rendered numeric count even when a later boundary cut the marker
+    short. A bare prefix or unrendered source/documentation template remains editable.
     Unknown/plugin/MCP tools stay effect-capable by default; known read-only
     tools may inspect or quote compressed history.
     """
@@ -85,7 +84,7 @@ def _context_pruned_argument_paths(tool_name: str, args: Any) -> list[str]:
 
     def _walk(value: Any, path: str) -> None:
         if isinstance(value, str):
-            if _COMPRESSION_MARKER_RE.search(value):
+            if _COMPRESSION_MARKER_ARTIFACT_RE.search(value):
                 found.append(path)
             return
         if isinstance(value, dict):

@@ -98,6 +98,8 @@ class _TerminalBatch:
         self.authorization_gate = _ConcurrentToolAuthorizationGate()
         self.executor = DaemonThreadPoolExecutor(max_workers=len(parsed))
         self.slots = [_TerminalSlot(self, pc, i) for i, pc in enumerate(parsed)]
+        # A published failure makes the informed consent for later slots stale.
+        self.failure_seen = False
 
     def start(self):
         from agent.tool_executor import _resolve_sequential_tool_timeout
@@ -211,17 +213,36 @@ def consume_prepared_guard(command, env_type, has_host_access):
     if slot is None or slot.preparing:
         return None
     slot.check_cancelled()
+    if slot.batch.failure_seen and slot.decision is not None:
+        slot.decision = None
+        return None
     from tools.approval_context import _approval_tool_call_id
     if (_approval_tool_call_id.get() != slot.parsed.ref(slot.batch.task_id).call_id
             or slot.guard_key != (command, env_type, has_host_access)):
         return None
     decision, slot.decision = slot.decision, None  # single-use, even for identical calls
+    # Only human consent remains valid across a prepared batch. Automatic policy
+    # decisions must be checked against the policy in force when execution starts.
+    if decision is not None and decision.get("approved") and not decision.get("user_approved"):
+        from tools.approval_context import _get_approval_mode
+        if not (decision.get("smart_approved") and _get_approval_mode() == "smart"):
+            return None
     return decision
 
 
 def preparing_terminal_approval():
     slot = _slot.get()
     return slot is not None and slot.preparing
+
+
+def mark_batch_outcome(failed: bool) -> None:
+    """Invalidate later prepared consent only after a failed result is published.
+
+    Sticky for the batch: a later success must not clear an earlier failure.
+    """
+    batch = _batch.get()
+    if batch is not None and failed:
+        batch.failure_seen = True
 
 
 def validate_prepared_terminal(args):

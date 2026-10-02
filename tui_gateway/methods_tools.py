@@ -1255,8 +1255,20 @@ def _skills_search(rid, params, query):
 
 
 def _skills_install(rid, params, query):
-    quiet = _tools_mod("types").SimpleNamespace(print=lambda *a, **k: None)
-    _tools_mod("hermes_cli.skills_hub").do_install(query, skip_confirm=True, console=quiet)
+    class _Capture:
+        def __init__(self):
+            self.lines = []
+
+        def print(self, *args, **kwargs):
+            self.lines.append(" ".join(str(arg) for arg in args))
+
+    captured = _Capture()
+    verdict = _tools_mod("hermes_cli.skills_hub").do_install(
+        query, skip_confirm=True, console=captured)
+    if verdict is not True:
+        log = "\n".join(captured.lines[-12:]).strip()
+        return _err(rid, 5031, log.splitlines()[-1] if log else "skill install failed",
+                    data={"installed": False, "name": query, "log": log or None})
     return _ok(rid, {"installed": True, "name": query})
 
 

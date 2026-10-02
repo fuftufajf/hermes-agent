@@ -256,13 +256,13 @@ def _resolve_log_path(log_name: str) -> Optional[Path]:
     return None
 
 
-def _redact_log_text(text: str) -> str:
+def _redact_log_text(text: str, *, redact_url_credentials: bool = False) -> str:
     """``redact_sensitive_text(force=True)`` + email scrub — fires regardless of the operator's
     ``security.redact_secrets`` setting; only the in-memory upload copy is sanitized."""
     if not text:
         return text
     from agent.redact import redact_sensitive_text
-    text = redact_sensitive_text(text, force=True)
+    text = redact_sensitive_text(text, force=True, redact_url_credentials=redact_url_credentials)
     return _EMAIL_ADDRESS_RE.sub("[REDACTED_EMAIL]", text)
 
 
@@ -346,24 +346,26 @@ def _capture_default_log_snapshots(
         for name in _REPORT_LOGS}
 
 
-def _capture_dump() -> str:
-    """Run ``hermes dump`` and return its stdout as a string."""
+def _capture_dump(redact: bool = True) -> str:
+    """Capture dump stdout; sanitize the upload copy, including URL credentials."""
     from hermes_cli.dump import run_dump
     capture = io.StringIO()
     with contextlib.redirect_stdout(capture), contextlib.suppress(SystemExit):
         run_dump(SimpleNamespace(show_keys=False))
-    return capture.getvalue()
+    text = capture.getvalue()
+    return _redact_log_text(text, redact_url_credentials=True) if redact else text
 
 
 def collect_debug_report(
     *, log_lines: int = 200, dump_text: str = "",
-    log_snapshots: Optional[dict[str, LogSnapshot]] = None) -> str:
+    log_snapshots: Optional[dict[str, LogSnapshot]] = None, redact: bool = True) -> str:
     """Build the summary debug report (system dump + log tails) as upload-ready text.
 
     ``dump_text`` is pre-captured dump output; when empty, ``hermes dump`` is run internally.
     """
     buf = io.StringIO()
-    buf.write(dump_text or _capture_dump())
+    dump = dump_text or _capture_dump(redact=redact)
+    buf.write(_redact_log_text(dump, redact_url_credentials=True) if redact else dump)
     if log_snapshots is None:
         log_snapshots = _capture_default_log_snapshots(log_lines)
     # In-process sanitiser heal counters: populated only inside a process that ran agent turns
@@ -394,10 +396,10 @@ def collect_share_bundle(log_lines: int = 200, redact: bool = True) -> dict[str,
     The dump header is prepended to each full log so every file is self-contained, and the
     redaction banner is prepended when ``redact`` is True.
     """
-    dump_text = _capture_dump()
+    dump_text = _capture_dump(redact=redact)
     log_snapshots = _capture_default_log_snapshots(log_lines, redact=redact)
     report = collect_debug_report(log_lines=log_lines, dump_text=dump_text,
-                                  log_snapshots=log_snapshots)
+                                  log_snapshots=log_snapshots, redact=redact)
     banner = _REDACTION_BANNER if redact else ""
     bundle: dict[str, str] = {"report": banner + report}
     for name in _FULL_LOGS:

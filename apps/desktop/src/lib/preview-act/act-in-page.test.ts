@@ -177,6 +177,45 @@ describe('elements', () => {
     expect(inventory(holder).elements?.map(e => e.label)).toEqual(['Search'])
   })
 
+  it('keeps a known ref when page scrolling moves its control above the viewport', () => {
+    const holder = page('<button id="save">Save</button>')
+    const ref = firstRef(holder)
+    const button = document.getElementById('save')!
+
+    const rect = vi.spyOn(button, 'getBoundingClientRect').mockReturnValue({
+      bottom: -160,
+      height: 40,
+      left: 0,
+      right: 40,
+      top: -200,
+      width: 40,
+      x: 0,
+      y: -200
+    } as DOMRect)
+
+    const scrollY = vi.spyOn(window, 'scrollY', 'get').mockReturnValue(200)
+
+    try {
+      expect(inventory(holder).delta?.same).toBe(1)
+      rect.mockReturnValue({
+        bottom: 40,
+        height: 40,
+        left: 0,
+        right: 40,
+        top: 0,
+        width: 40,
+        x: 0,
+        y: 0
+      } as DOMRect)
+      scrollY.mockReturnValue(0)
+      expect(inventory(holder).delta?.same).toBe(1)
+      expect(actInPage(document, holder, { kind: 'locate', ref }).success).toBe(true)
+    } finally {
+      rect.mockRestore()
+      scrollY.mockRestore()
+    }
+  })
+
   // Wikipedia and friends are full of these: decorative chrome and collapsed
   // menus that are perfectly solid boxes as far as layout is concerned, but
   // that the page has already declared are not for anyone to interact with.

@@ -176,7 +176,7 @@ class TestNoninteractiveGitEnv:
         system_config.write_text("[safe]\n\tdirectory = *\n", encoding="utf-8")
         global_config = tmp_path / "gitconfig"
         global_config.write_text(
-            f"[safe]\n\tdirectory = \n\tdirectory = {trusted}\n", encoding="utf-8"
+            f"[safe]\n\tdirectory = \n\tdirectory = {trusted.as_posix()}\n", encoding="utf-8"
         )
 
         env = noninteractive_git_env(

@@ -2,9 +2,11 @@
 
 import json
 import queue
+import sys
 import threading
 import time
 from contextlib import ExitStack
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -65,7 +67,10 @@ def test_desktop_publishes_final_commands_before_wait_and_runs_in_order(tmp_path
         source.write_text("input")
         calls[:0] = [SimpleNamespace(id=f"read-{i}", type="function", function=SimpleNamespace(
             name="read_file", arguments=json.dumps({"path": str(source)}))) for i in range(read_count)]
-    commands = {"original-first": f"rm -rf absent-first; cd '{nested}'", "original-second": "rm -rf absent-second; pwd"}
+    commands = {
+        "original-first": f"rm -rf absent-first; cd '{nested}'",
+        "original-second": f'''rm -rf absent-second; "{Path(sys.executable).as_posix()}" -c "import os; print(os.getcwd())"''',
+    }
     policy = []
     executed = []
     flushed = []

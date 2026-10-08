@@ -95,14 +95,47 @@ class TavilyWebSearchProvider(BaseWebSearchProvider):
     EXTRACT = True
     KEYLESS = True
 
-    def search(self, query: str, limit: int = 5) -> Dict[str, Any]:
+    def supported_search_options(self):
+        return frozenset({"mode", "topic", "time_range", "include_domains", "exclude_domains"})
+
+    def search(
+        self,
+        query: str,
+        limit: int = 5,
+        mode: Optional[str] = None,
+        topic: Optional[str] = None,
+        time_range: Optional[str] = None,
+        include_domains: Optional[List[str]] = None,
+        exclude_domains: Optional[List[str]] = None,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
         def _body() -> Dict[str, Any]:
             key, missing, prefix = _auth("search")
             if missing:
                 return search_fail(missing)
             logger.info("Tavily %ssearch: '%s' (limit=%d)", prefix, query, limit)
             payload = {"query": query, "max_results": min(limit, SEARCH_LIMIT_CAP), **_SEARCH_PAYLOAD}
-            return _normalize_tavily_search_results(_tavily_request("search", payload, api_key=key))
+            warnings = []
+            if mode in {"fast", "deep"}:
+                payload["search_depth"] = {"fast": "basic", "deep": "advanced"}[mode]
+            elif mode:
+                warnings.append(f"invalid Tavily mode '{mode}' ignored")
+            if topic in {"general", "news", "finance"}:
+                payload["topic"] = topic
+            elif topic:
+                warnings.append(f"invalid Tavily topic '{topic}' ignored")
+            if time_range in {"day", "week", "month", "year"}:
+                payload["time_range"] = time_range
+            elif time_range:
+                warnings.append(f"invalid Tavily time_range '{time_range}' ignored")
+            if include_domains:
+                payload["include_domains"] = list(include_domains)
+            if exclude_domains:
+                payload["exclude_domains"] = list(exclude_domains)
+            result = _normalize_tavily_search_results(_tavily_request("search", payload, api_key=key))
+            if warnings:
+                result["warnings"] = warnings
+            return result
 
         return run_search("Tavily", logger, _body)
 

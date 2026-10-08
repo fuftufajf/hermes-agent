@@ -572,6 +572,60 @@ describe('actOnActivePreview (drive_preview tool)', () => {
     expect(result.error).toContain('never reached the page')
   })
 
+  it.each([false, true])('distinguishes a missed click from a replaced document (navigation=%s)', async navigated => {
+    const frames = [document.createElement('iframe'), document.createElement('iframe')]
+    document.body.append(...frames)
+    let guest = frames[0]
+    const target = guest.contentDocument!.createElement('button')
+    target.id = 'next'
+    target.textContent = 'Next page'
+    guest.contentDocument!.body.append(target)
+    vi.spyOn(target, 'getBoundingClientRect').mockReturnValue({
+      bottom: 40,
+      height: 40,
+      left: 0,
+      right: 40,
+      top: 0,
+      width: 40,
+      x: 0,
+      y: 0
+    } as DOMRect)
+    const tabId = openBrowserTab()
+    cleanups.push(
+      registerPreviewScriptRunner(tabId, async code =>
+        new Function('window', 'document', 'requestAnimationFrame', 'return ' + code)(
+          guest.contentWindow,
+          guest.contentDocument,
+          (callback: () => void) => setTimeout(callback, 0)
+        )
+      )
+    )
+    cleanups.push(
+      registerPreviewInput(tabId, {
+        focus: vi.fn(),
+        send: event => {
+          if (navigated && event.type === 'mouseUp') {
+            guest = frames[1]
+          }
+        }
+      })
+    )
+
+    try {
+      const result = await actOnActivePreview({ kind: 'click', selector: '#next' })
+      expect(result.success).toBe(navigated)
+
+      if (navigated) {
+        expect(result.note).toContain('navigat')
+        expect(result.error).toBeUndefined()
+      } else {
+        expect(result.error).toContain('never reached the page')
+      }
+    } finally {
+      frames.forEach(frame => frame.remove())
+    }
+  })
+
   it('says so when the overlay itself swallowed the click', async () => {
     const tabId = openBrowserTab()
 

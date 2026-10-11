@@ -223,9 +223,22 @@ def _rename_riding_out_file_lock(src: Path, dst: Path) -> None:
 def _desktop_staging_dir(desktop_dir: Path) -> Path:
     """Fresh staging dir ``apps/desktop/.staging-<pid>-<ts>``: a sibling of ``release/`` (same fs → the
     swap is a rename) but not inside it, so ``release/*-unpacked`` globs never see it. Sweeps leftovers."""
-    for stale in desktop_dir.glob(f"{_DESKTOP_STAGING_PREFIX}*"):
+    # A macOS File Provider may attach FinderInfo to every .app/.framework
+    # in Documents, making signing and strict verification fail repeatedly.
+    # A reviewed local release symlink keeps packaged products outside that
+    # provider. Stage next to the resolved release target so both renames stay
+    # on its filesystem; do not migrate or replace an existing release here.
+    release_dir = desktop_dir / "release"
+    output_parent = desktop_dir
+    prefix = _DESKTOP_STAGING_PREFIX
+    if sys.platform == "darwin" and release_dir.is_symlink():
+        output_parent = release_dir.resolve().parent
+        output_parent.mkdir(parents=True, exist_ok=True)
+        install_key = hashlib.sha256(str(desktop_dir.resolve()).encode()).hexdigest()[:12]
+        prefix = f"{_DESKTOP_STAGING_PREFIX}{install_key}-"
+    for stale in output_parent.glob(f"{prefix}*"):
         shutil.rmtree(stale, ignore_errors=True)
-    return desktop_dir / f"{_DESKTOP_STAGING_PREFIX}{os.getpid()}-{int(_time_mod.time())}"
+    return output_parent / f"{prefix}{os.getpid()}-{int(_time_mod.time())}"
 
 
 def _desktop_unpacked_root(exe: Path, release_dir: Path) -> Path:

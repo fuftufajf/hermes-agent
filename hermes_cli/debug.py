@@ -362,13 +362,14 @@ def _capture_dump(redact: bool = True) -> str:
 
 def collect_debug_report(
     *, log_lines: int = 200, dump_text: str = "",
-    log_snapshots: Optional[dict[str, LogSnapshot]] = None) -> str:
+    log_snapshots: Optional[dict[str, LogSnapshot]] = None, redact: bool = True) -> str:
     """Build the summary debug report (system dump + log tails) as upload-ready text.
 
     ``dump_text`` is pre-captured dump output; when empty, ``hermes dump`` is run internally.
     """
     buf = io.StringIO()
-    buf.write(dump_text or _capture_dump())
+    dump = dump_text or _capture_dump(redact=redact)
+    buf.write(redact_debug_support_text(dump) if redact else dump)
     if log_snapshots is None:
         log_snapshots = _capture_default_log_snapshots(log_lines)
     # In-process sanitiser heal counters: populated only inside a process that ran agent turns
@@ -407,7 +408,7 @@ def collect_share_bundle(log_lines: int = 200, redact: bool = True) -> dict[str,
     dump_text = _capture_dump(redact=redact)
     log_snapshots = _capture_default_log_snapshots(log_lines, redact=redact)
     report = collect_debug_report(log_lines=log_lines, dump_text=dump_text,
-                                  log_snapshots=log_snapshots)
+                                  log_snapshots=log_snapshots, redact=redact)
     banner = _REDACTION_BANNER if redact else ""
     bundle: dict[str, str] = {"report": banner + report}
     from hermes_cli.logs import LOG_FILES

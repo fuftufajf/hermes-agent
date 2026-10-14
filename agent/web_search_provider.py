@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import abc
 import os
-from typing import Any, Dict, List
+from typing import Any
 
 from agent.provider_base import ProviderBase
 
@@ -86,7 +86,11 @@ class WebSearchProvider(ProviderBase):
         the dispatcher awaits coroutine functions)."""
         return False
 
-    def search(self, query: str, limit: int = 5) -> dict[str, Any]:
+    def supported_search_options(self):
+        """Optional per-call search options this provider accepts."""
+        return frozenset()
+
+    def search(self, query: str, limit: int = 5, **kwargs: Any) -> dict[str, Any]:
         """Execute a web search. Callers gate on :meth:`supports_search`."""
         raise NotImplementedError(
             f"{self.name} does not support search (override supports_search)"

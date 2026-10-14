@@ -292,6 +292,9 @@ ${preamble()}
       var out = act({ kind: 'elements' });
       watch('sweep');
       out.hit = w.__hermesHit || null;
+      // locate always arms this property, even when no input arrives. Its
+      // absence means a new document answered after navigation.
+      out.navigated = !Object.prototype.hasOwnProperty.call(w, '__hermesHit');
       return JSON.stringify(out);
     } catch (err) {
       return JSON.stringify({ note: 'The page changed before it could be re-read: ' + err, success: true });
@@ -669,7 +672,14 @@ async function driveAction(
     return { acted, note: NAVIGATED, success: true }
   }
 
-  const { hit, ...result } = after.result as PreviewActResult & { hit?: { tag: string; trusted: boolean } | null }
+  const { hit, navigated, ...result } = after.result as PreviewActResult & {
+    hit?: { tag: string; trusted: boolean } | null
+    navigated?: boolean
+  }
+
+  if (navigated) {
+    return { ...result, acted, note: NAVIGATED, success: true }
+  }
 
   // The witness the locate trip armed. No record means the input never reached
   // the document, which the agent must hear about — every other signal here

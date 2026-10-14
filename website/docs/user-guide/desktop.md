@@ -772,6 +772,27 @@ The opt-in HUD modifier-tap helper is built with the Electron bundle and package
 
 ### macOS permissions and local rebuilds (TCC)
 
+**File Provider folders and source builds.** Some macOS File Providers attach
+`com.apple.FinderInfo` to every `.app` and `.framework` in managed folders such
+as Documents. This can make `codesign` report “resource fork, Finder information,
+or similar detritus not allowed”. Removing that attribute is insufficient if
+the provider immediately restores it. Even an app signed in a temporary folder
+can fail strict verification after being copied back.
+
+For a reviewed source installation, keep `apps/desktop/release` as a symlink to
+a permanent, private local directory outside File Provider folders. Hermes
+places its macOS packaging stage next to the resolved target, keeping the
+signing step and atomic promotion on the same local filesystem. This does not
+create or migrate the symlink automatically: preserve any existing release and
+configure the local destination during maintenance. Use a per-installation
+directory, not a shared release root; do not use `/tmp` as the permanent location.
+Verify the final app through the release symlink with `codesign --verify --deep
+--strict`, as well as its normal frontend freshness receipt.
+
+Changing certificates or disabling signature verification does not repair
+File Provider metadata. Configuration, credentials and TCC grants retain their
+existing storage locations.
+
 **Silence every folder prompt with one switch.** macOS prompts per-category
 (Desktop, then Downloads, then Documents, ...) as Hermes touches each folder.
 A single **Full Disk Access** grant covers all of them, permanently — and

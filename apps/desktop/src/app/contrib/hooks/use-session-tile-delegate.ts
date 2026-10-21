@@ -409,6 +409,7 @@ export function useSessionTileDelegate({
               requestForSessionProfile<SessionResumeResult>(owner, requestGateway, 'session.resume', {
                 session_id: storedSessionId,
                 cols: 96,
+                source: 'desktop',
                 omit_messages: true,
                 ...(owner ? { profile: typeof owner === 'string' ? owner : owner.profile } : {})
               })

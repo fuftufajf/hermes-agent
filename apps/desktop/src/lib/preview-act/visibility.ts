@@ -96,10 +96,10 @@ export function visibilityKit(doc: Document, win: null | Window): VisibilityKit 
 
     const rect = el.getBoundingClientRect()
 
-    // Below the fold is fine — we scroll to it. Off to the LEFT or ABOVE is the
-    // other half of the sr-only trick (`left: -9999px`, `top: -9999px`) and
-    // scrolling never brings those back.
-    if (rect.right <= 0 || rect.bottom <= 0) {
+    // Compare with the page origin, not the viewport: scrolling past a real
+    // control must not retire its ref. Negative page coordinates still exclude
+    // the off-screen sr-only trick (`left: -9999px`, `top: -9999px`).
+    if (rect.right + (win?.scrollX || 0) <= 0 || rect.bottom + (win?.scrollY || 0) <= 0) {
       return false
     }
 

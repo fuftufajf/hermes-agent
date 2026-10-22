@@ -70,16 +70,16 @@
     "@xmldom/xmldom@^0.9": "0.9.12",
     "katex": "0.18.2",
     "postcss-selector-parser": "7.1.6",
-    "postcss": "8.5.23",
+    "postcss": "8.5.31",
     "tar": "7.5.22",
     "source-map-js": "1.2.2",
     "yaml": "2.9.1",
-    "vitest": "4.1.11",
-    "@vitest/mocker": "4.1.11",
+    "vitest": "4.1.12",
+    "@vitest/mocker": "4.1.12",
     "follow-redirects": "1.16.1",
     "http-cache-semantics": "4.2.1",
     "joi": "18.2.9",
-    "sanitize-html": "2.18.0"
+    "sanitize-html": "2.18.1"
   },
   "engines": {
     "node": "^22.22.0 || ^24.11.0 || >=26.0.0",

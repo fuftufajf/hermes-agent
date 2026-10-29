@@ -583,7 +583,10 @@ class TestWebSearchSchema:
              patch.object(tools.web_tools._debug, "save"):
             result = json.loads(tools.web_tools.web_search_tool("docs", limit=500))
 
-        assert result == {"success": True, "data": {"web": []}}
+        assert result["success"] is True
+        assert result["data"] == {"web": []}
+        assert result["meta"]["served_by"] == "parallel"
+        assert result["meta"]["result_count"] == 0
         fake_search.assert_called_once_with("docs", 100)
 
 
@@ -1023,6 +1026,7 @@ def test_xai_only_gate_agrees_with_dispatcher_when_web_xai_plugin_loaded(monkeyp
     try:
         with patch("tools.web_tools._load_web_config", return_value={}), \
              patch("tools.web_tools._ensure_web_plugins_loaded", lambda: None), \
+             patch("tools.web_tools._ddgs_package_importable", return_value=False), \
              patch("tools.web_tools.check_firecrawl_api_key", return_value=False), \
              patch("agent.web_search_registry._keyless_tier_enabled", return_value=False):
             from tools.web_tools import _get_backend, check_web_api_key

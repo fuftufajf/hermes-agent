@@ -6,10 +6,17 @@ import { group } from '@/components/pane-shell/tree/model'
 import { $layoutTree, noteActiveTreeGroup } from '@/components/pane-shell/tree/store'
 import { createClientSessionState } from '@/lib/chat-runtime'
 import { runTour } from '@/lib/tour'
+import type { ScopedServerRequest } from '@/store/gateway'
 import { $previewTabs, closeRightRail, openPreview, setPreviewTabPinned } from '@/store/preview'
 import { hasOpenServerRequest, resetServerRequestsForTests } from '@/store/server-requests'
 import { setActiveSessionId, setSelectedStoredSessionId, setSessions } from '@/store/session'
-import { $sessionStates, $sessionTiles, dropSessionState, publishSessionState } from '@/store/session-states'
+import {
+  $sessionStates,
+  $sessionTiles,
+  dropSessionState,
+  publishSessionState,
+  recordSessionEventScope
+} from '@/store/session-states'
 import { $toursEnabled } from '@/store/tours'
 import type { SessionInfo } from '@/types/hermes'
 
@@ -42,19 +49,119 @@ const deps = {
   upsertToolCall: () => undefined
 } as ServerRequestContext['deps']
 
-function deliver(method: string, params: Record<string, unknown>, activeSessionId: null | string, replayed?: boolean) {
+function deliver(
+  method: string,
+  params: Record<string, unknown>,
+  activeSessionId: null | string,
+  replayed?: boolean,
+  scope: Partial<Pick<ScopedServerRequest, 'connectionId' | 'profile'>> = {}
+) {
   const respond = vi.fn()
   const fail = vi.fn()
   const decline = vi.fn()
+  deps.activeSessionIdRef.current = activeSessionId
 
   const handled = handleServerRequest(
-    { decline, fail, id: 'srq-1', method, params, profile: 'default', replayed, respond },
+    { decline, fail, id: 'srq-1', method, params, profile: 'default', replayed, respond, ...scope },
     deps,
     activeSessionId
   )
 
   return { decline, fail, handled, respond }
 }
+
+describe('focused tile preview action ownership', () => {
+  const back = vi.fn()
+  let unregisterNav: (() => void) | undefined
+
+  function focus(storedId: string) {
+    $layoutTree.set(
+      group(['workspace', 'session-tile:stored-a', 'session-tile:stored-b'], {
+        active: `session-tile:${storedId}`,
+        id: 'focused-owner'
+      })
+    )
+    noteActiveTreeGroup('focused-owner')
+  }
+
+  function hostTiles() {
+    $sessionTiles.set([
+      { runtimeId: 'tile-a', storedSessionId: 'stored-a', ownerRoute: { connectionId: 'local', profile: 'default' } },
+      { runtimeId: 'tile-b', storedSessionId: 'stored-b', ownerRoute: { connectionId: 'local', profile: 'default' } }
+    ] as never)
+
+    for (const [runtimeId, storedId] of [['tile-a', 'stored-a'], ['tile-b', 'stored-b']]) {
+      publishSessionState(runtimeId, createClientSessionState(storedId))
+      recordSessionEventScope({ session_id: runtimeId, connectionId: 'local', profile: 'default' })
+    }
+
+    focus('stored-a')
+    openPreview({ kind: 'url', label: 'a', source: 'https://a.example', url: 'https://a.example' }, 'stored-a')
+    unregisterNav = registerPreviewNav($previewTabs.get().find(tab => tab.target.source === 'https://a.example')!.id, {
+      back,
+      forward: () => {},
+      reload: () => {}
+    })
+  }
+
+  beforeEach(() => {
+    back.mockClear()
+    requestPopoutPreviewAct.mockResolvedValue(null)
+    hasLivePreviewSurface.mockReturnValue(true)
+  })
+
+  afterEach(() => {
+    unregisterNav?.()
+    unregisterNav = undefined
+    closeRightRail()
+    $sessionTiles.set([])
+    noteActiveTreeGroup(null)
+    $layoutTree.set(null)
+    dropSessionState('tile-a')
+    dropSessionState('tile-b')
+    setActiveSessionId(null)
+    setSelectedStoredSessionId(null)
+    deps.activeSessionIdRef.current = null
+    hasLivePreviewSurface.mockReturnValue(false)
+  })
+
+  it('lets a restored focused tile drive only on its owning connection and profile', async () => {
+    hostTiles()
+
+    const act = (session_id: string, connectionId = 'local', profile = 'default') =>
+      deliver('preview.act', { action: 'back', session_id }, null, false, { connectionId, profile })
+
+    const restored = act('tile-a')
+    await vi.waitFor(() => expect(restored.respond).toHaveBeenCalledTimes(1))
+    expect(JSON.parse(restored.respond.mock.calls[0][0].value)).toMatchObject({ success: true })
+    expect(back).toHaveBeenCalledTimes(1)
+
+    for (const refused of [act('tile-b'), act('tile-a', 'other-host'), act('tile-a', 'local', 'other-profile')]) {
+      expect(JSON.parse(refused.respond.mock.calls[0][0].value)).toMatchObject({ success: false })
+    }
+
+    expect(back).toHaveBeenCalledTimes(1)
+  })
+
+  it('rechecks focus after reconnect replay and while the preview engine loads', async () => {
+    const replay = deliver('preview.act', { action: 'back', session_id: 'tile-b' }, null, true, {
+      connectionId: 'local'
+    })
+
+    hostTiles()
+    await vi.waitFor(() => expect(replay.respond).toHaveBeenCalledTimes(1))
+    expect(JSON.parse(replay.respond.mock.calls[0][0].value)).toMatchObject({ success: false })
+
+    const pending = deliver('preview.act', { action: 'back', session_id: 'tile-a' }, null, false, {
+      connectionId: 'local'
+    })
+
+    focus('stored-b')
+    await vi.waitFor(() => expect(pending.respond).toHaveBeenCalledTimes(1))
+    expect(JSON.parse(pending.respond.mock.calls[0][0].value)).toMatchObject({ success: false })
+    expect(back).not.toHaveBeenCalled()
+  })
+})
 
 describe('connection request routing', () => {
   it('does not route connection operations through the server-request rail', () => {

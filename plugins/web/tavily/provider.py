@@ -9,7 +9,7 @@ keyless ring — keyless access is opt-in by selecting Tavily in ``hermes tools`
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import httpx
 
@@ -34,7 +34,7 @@ def _tavily_headers(api_key: str) -> dict[str, str]:
     return headers
 
 
-def _tavily_request(endpoint: str, payload: dict[str, Any], *, api_key: Optional[str] = None) -> dict[str, Any]:
+def _tavily_request(endpoint: str, payload: dict[str, Any], *, api_key: str | None = None) -> dict[str, Any]:
     """POST to Tavily and return parsed JSON. ``api_key=None`` reads ``TAVILY_API_KEY``;
     pass ``""`` to force the keyless header even when a key exists
     (``web.provider_tier.tavily: free``). Non-2xx raises ValueError with the body so
@@ -76,7 +76,7 @@ def _missing_key_error(action: str) -> str:
     return f"TAVILY_API_KEY is not set. Get a key at https://app.tavily.com/home or select Tavily in `hermes tools` for opt-in keyless {action}."
 
 
-def _auth(action: str) -> tuple[Optional[str], Optional[str], str]:
+def _auth(action: str) -> tuple[str | None, str | None, str]:
     """``(request_key, missing_key_error, log_prefix)``: request key is ``""`` when forcing
     keyless, ``None`` when neither key nor keyless applies (``missing_key_error`` set)."""
     api_key = provider_env("TAVILY_API_KEY")
@@ -95,14 +95,47 @@ class TavilyWebSearchProvider(BaseWebSearchProvider):
     EXTRACT = True
     KEYLESS = True
 
-    def search(self, query: str, limit: int = 5) -> dict[str, Any]:
+    def supported_search_options(self):
+        return frozenset({"mode", "topic", "time_range", "include_domains", "exclude_domains"})
+
+    def search(
+        self,
+        query: str,
+        limit: int = 5,
+        mode: str | None = None,
+        topic: str | None = None,
+        time_range: str | None = None,
+        include_domains: list[str] | None = None,
+        exclude_domains: list[str] | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
         def _body() -> dict[str, Any]:
             key, missing, prefix = _auth("search")
             if missing:
                 return search_fail(missing)
             logger.info("Tavily %ssearch: '%s' (limit=%d)", prefix, query, limit)
             payload = {"query": query, "max_results": min(limit, SEARCH_LIMIT_CAP), **_SEARCH_PAYLOAD}
-            return _normalize_tavily_search_results(_tavily_request("search", payload, api_key=key))
+            warnings = []
+            if mode in {"fast", "deep"}:
+                payload["search_depth"] = {"fast": "basic", "deep": "advanced"}[mode]
+            elif mode:
+                warnings.append(f"invalid Tavily mode '{mode}' ignored")
+            if topic in {"general", "news", "finance"}:
+                payload["topic"] = topic
+            elif topic:
+                warnings.append(f"invalid Tavily topic '{topic}' ignored")
+            if time_range in {"day", "week", "month", "year"}:
+                payload["time_range"] = time_range
+            elif time_range:
+                warnings.append(f"invalid Tavily time_range '{time_range}' ignored")
+            if include_domains:
+                payload["include_domains"] = list(include_domains)
+            if exclude_domains:
+                payload["exclude_domains"] = list(exclude_domains)
+            result = _normalize_tavily_search_results(_tavily_request("search", payload, api_key=key))
+            if warnings:
+                result["warnings"] = warnings
+            return result
 
         return run_search("Tavily", logger, _body)
 

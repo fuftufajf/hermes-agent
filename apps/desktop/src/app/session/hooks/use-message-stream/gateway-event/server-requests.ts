@@ -1,4 +1,4 @@
-import { JSON_RPC_INTERNAL_ERROR, type SetupBeat } from '@hermes/shared'
+import { JSON_RPC_INTERNAL_ERROR, registryBackendScopeKey, type SetupBeat } from '@hermes/shared'
 
 import {
   hasLivePreviewSurface,
@@ -19,9 +19,10 @@ import type { PreviewActAction } from '@/lib/preview-act/act-in-page'
 import type { TourAction, TourStep } from '@/lib/tour'
 import { type AppearanceValues, applyAppearance, THEME_MODES } from '@/store/appearance-apply'
 import { type ClarifyRequest, normalizeQuestions, setClarifyRequest } from '@/store/clarify'
-import type { ScopedServerRequest } from '@/store/gateway'
+import { activeGatewayConnectionId, type ScopedServerRequest } from '@/store/gateway'
 import { dispatchNativeNotification } from '@/store/native-notifications'
 import type { PreviewOwner } from '@/store/preview-ownership'
+import { $activeGatewayProfile } from '@/store/profile'
 import {
   receiveApprovalRequest,
   setSecretRequest,
@@ -32,9 +33,13 @@ import {
 } from '@/store/prompts'
 import { rememberServerRequest } from '@/store/server-requests'
 import { $selectedStoredSessionId, $sessions, lineageAliases, sessionMatchesStoredId } from '@/store/session'
+import { $focusedSessionIsTile } from '@/store/session-focus'
+import { ambientGatewayOwnsEverySession } from '@/store/session-owner-resolution'
 import {
+  $focusedRuntimeId,
   $sessionStates,
   $sessionTiles,
+  knownOwnerForSession,
   previewScopeForRuntime,
   storedSessionIdForRuntimeId
 } from '@/store/session-states'
@@ -537,7 +542,7 @@ const previewRead: Handler = ({ request, sessionId }) => {
   })()
 }
 
-const previewAct: Handler = ({ deps, isActiveSession, request, sessionId }) => {
+const previewAct: Handler = ({ deps, request, sessionId }) => {
   // drive_preview tool: click/type/scroll/press inside the guest page. Active
   // session only: a background turn (including one in a tile this window hosts)
   // must never reach into the page the user is working in (desktop AGENTS.md:
@@ -545,11 +550,42 @@ const previewAct: Handler = ({ deps, isActiveSession, request, sessionId }) => {
   // before this runs, so a refusal here reaches the tool instead of stalling it.
   const p = request.params
 
-  if (!isActiveSession) {
-    answerValue(request, {
-      error: 'The in-app browser only takes actions in the session the user is looking at.',
-      success: false
-    })
+  const refused = {
+    error: 'The in-app browser only takes actions in the session the user is looking at.',
+    success: false
+  }
+
+  const isActive = () => {
+    const storedIdForRuntimeId = (runtimeId: string) =>
+      deps.sessionStateByRuntimeIdRef.current.get(runtimeId)?.storedSessionId ?? undefined
+
+    // A restored tile can own the foreground while the primary is unbound.
+    // Both routes retain the upstream guard that acts only on their own tabs.
+    const focused = $focusedSessionIsTile.get() ? $focusedRuntimeId.get() : null
+
+    if (
+      !requestNamesActiveSession({ activeSessionId: deps.activeSessionIdRef.current, sessionId, storedIdForRuntimeId }) &&
+      !requestNamesActiveSession({ activeSessionId: focused, sessionId, storedIdForRuntimeId })
+    ) {
+      return false
+    }
+
+    const owner = knownOwnerForSession(sessionId)
+
+    if (!owner && !ambientGatewayOwnsEverySession()) {
+      return false
+    }
+
+    const connectionId = typeof owner === 'string' ? null : (owner?.connectionId ?? activeGatewayConnectionId())
+    const profile = typeof owner === 'string' ? owner : (owner?.profile ?? $activeGatewayProfile.get())
+
+    return (
+      registryBackendScopeKey(request.connectionId, request.profile) === registryBackendScopeKey(connectionId, profile)
+    )
+  }
+
+  if (!isActive()) {
+    answerValue(request, refused)
 
     return
   }
@@ -602,6 +638,14 @@ const previewAct: Handler = ({ deps, isActiveSession, request, sessionId }) => {
       }
 
       const run = await loadPreviewEngine()
+
+      // Reconnect or lazy loading may outlive a focus or owner change.
+      if (!isActive()) {
+        answerValue(request, refused)
+
+        return
+      }
+
       const result = await run(action, signal, owner)
 
       answerValue(request, result)

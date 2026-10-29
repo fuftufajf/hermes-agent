@@ -12,6 +12,7 @@ import logging
 import re
 import threading
 import uuid
+from contextvars import ContextVar
 from typing import Any, Callable, Dict, List, Optional
 
 from plugins.web._common import document as _page, page_error as _page_error, search_fail, search_ok, web_hit as _row
@@ -348,11 +349,13 @@ _KEYLESS_EXTRACTORS: dict[str, Callable[[list[str]], list[dict[str, Any]]]] = {v
 # spreads across vendors; advances once per unpinned keyless request.
 _ring_lock = threading.Lock()
 _ring_cursor = int(_SESSION_ID, 16) % len(_KEYLESS_RING)
+_explicit_vendor: ContextVar[str] = ContextVar("keyless_explicit_vendor", default="")
 
 
 def _vendor_pinned(name: str) -> bool:
-    """True when config explicitly routes web traffic to *name* (backend keys or a
-    ``free`` tier pin). A pinned vendor starts every keyless request."""
+    """True when this call or config explicitly routes web traffic to *name*."""
+    if name and name == _explicit_vendor.get():
+        return True
     if provider_tier(name) == "free":
         return True
     try:

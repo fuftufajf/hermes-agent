@@ -70,7 +70,16 @@
     "vitest": "4.1.12",
     "@vitest/mocker": "4.1.12",
     "fast-uri": "3.1.9",
-    "zod": "4.6.7"
+    "zod": "4.6.7",
+    "eslint": {
+      "minimatch": "11.0.1"
+    },
+    "@eslint/config-array": {
+      "minimatch": "11.0.1"
+    },
+    "@typescript-eslint/typescript-estree": {
+      "minimatch": "11.0.1"
+    }
   },
   "engines": {
     "node": "^22.22.0 || ^24.11.0 || >=26.0.0",

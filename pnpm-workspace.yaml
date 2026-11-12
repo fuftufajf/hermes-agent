@@ -55,6 +55,9 @@ overrides:
   yaml: 2.9.1
   vitest: 4.1.12
   '@vitest/mocker': 4.1.12
+  # NYX: wait-on (desktop dev tool) resolves vulnerable releases; both pins stay inside its ranges.
+  follow-redirects: 1.16.2  # GHSA-mrwp-f3q8-3g9p
+  joi@^18: 18.3.1  # GHSA-4528-x5fx-h6hg
 
 allowBuilds:
   unicode-animations: false
